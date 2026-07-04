@@ -100,8 +100,31 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
-        renderStatus("스캔 버튼을 눌러 주변 BLE 기기를 탐지하세요.")
         renderTargets()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 스캔 중이 아니면, 앱 진입/복귀 시마다 실제 상태(서비스 가동·배터리 예외)를 다시 읽어 표시.
+        // 배터리 최적화 예외 다이얼로그를 허용하고 돌아온 경우에도 여기서 최신 상태가 반영된다.
+        if (!scanning) renderMonitorStatus()
+    }
+
+    /** 백그라운드 서비스 가동 여부 + 배터리 최적화 예외 적용 여부를 상태창에 표시 */
+    private fun renderMonitorStatus() {
+        val running = BleMonitorService.isRunning
+        val exempt = !isBatteryOptimized()
+
+        val sb = StringBuilder()
+        sb.append(if (running) "✅ 백그라운드 자동감지: 실행 중" else "⛔ 백그라운드 자동감지: 꺼짐 (아래 버튼으로 켜세요)")
+        sb.append("\n")
+        sb.append(if (exempt) "✅ 배터리 최적화 예외 적용됨"
+                  else "⚠ 배터리 최적화 예외 미적용 — 백그라운드가 꺼질 수 있습니다.")
+        renderStatus(sb.toString())
+
+        if (::monitorButton.isInitialized) {
+            monitorButton.text = if (running) "백그라운드 자동감지 재시작" else "백그라운드 자동감지 켜기"
+        }
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
@@ -137,11 +160,15 @@ class MainActivity : Activity() {
             text = "백그라운드 자동감지 켜기"
             setOnClickListener {
                 ParkingWidgetProvider.startMonitor(this@MainActivity)
-                val opt = if (isBatteryOptimized()) {
+                if (isBatteryOptimized()) {
+                    // 시스템 예외 허용 다이얼로그 표시. 허용 후 앱으로 돌아오면 onResume 이
+                    // 실제 상태를 다시 읽어 "✅ 배터리 최적화 예외 적용됨" 을 표시한다.
+                    renderStatus("백그라운드 자동감지 서비스를 시작했습니다.\n⚠ 배터리 최적화 예외를 허용해주세요 (백그라운드 생존).")
                     requestBatteryExemption()
-                    "\n⚠ 배터리 최적화 예외를 허용해주세요 (백그라운드 생존)."
-                } else "\n✅ 배터리 최적화 예외 적용됨."
-                renderStatus("백그라운드 자동감지 서비스를 시작했습니다.$opt")
+                } else {
+                    // 이미 예외 상태 → 즉시 최신 상태 표시
+                    renderMonitorStatus()
+                }
             }
         }
         root.addView(monitorButton)
