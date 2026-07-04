@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Parking Memory</string>
+    <string name="floor_1">1F</string>
+    <string name="floor_2">2F</string>
+    <string name="title_text">Where did I park?</string>
+</resources>

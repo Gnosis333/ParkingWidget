@@ -1,0 +1,19 @@
+# Gradle
+.gradle/
+build/
+app/build/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+.DS_Store
+captures/
+
+# Local config (contains SDK path)
+local.properties
+
+# Build logs
+build_log*.txt
+
+# Screenshots / scratch
+screen*.png
