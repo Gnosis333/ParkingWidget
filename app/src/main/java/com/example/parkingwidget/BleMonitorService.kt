@@ -29,6 +29,15 @@ class BleMonitorService : Service() {
         private const val NOTIF_ID = 2001
         private const val COOLDOWN_MS = 30_000L     // 같은 층 재감지 무시 시간
         private const val ANCHOR_FRESH_MS = 20_000L // 최근 N초 내 본 앵커만 유효
+
+        /**
+         * 백그라운드 감지 서비스 가동 여부.
+         * 프로세스가 살아있고 서비스가 도는 동안만 true.
+         * 재부팅/강제종료로 프로세스가 죽으면 새 프로세스에서 기본값 false → 위젯이 회색으로 표시됨.
+         */
+        @Volatile
+        var isRunning = false
+            private set
     }
 
     private var lastFloor = 0
@@ -86,6 +95,8 @@ class BleMonitorService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIF_ID, buildNotification("감지 대기 중"))
+        isRunning = true
+        ParkingWidgetProvider.refreshAll(this)  // 위젯을 활성(컬러) 상태로 전환
         startBleScan()
         return START_STICKY  // 시스템이 종료해도 자동 재시작
     }
@@ -146,7 +157,9 @@ class BleMonitorService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        unregisterReceiver(btStateReceiver)
+        isRunning = false
+        try { unregisterReceiver(btStateReceiver) } catch (_: Exception) {}
+        ParkingWidgetProvider.refreshAll(this)  // 위젯을 비활성(회색) 상태로 전환
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

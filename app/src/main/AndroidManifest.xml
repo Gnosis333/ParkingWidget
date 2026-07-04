@@ -23,7 +23,8 @@
 
     <application
         android:allowBackup="true"
-        android:icon="@drawable/bg_widget_container"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:theme="@android:style/Theme.DeviceDefault.Light">
 
