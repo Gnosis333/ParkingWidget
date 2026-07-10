@@ -28,6 +28,22 @@ object ParkingAnchors {
 
     val ALL_ANCHORS: Set<String> = F1_ANCHORS + F2_ANCHORS
 
+    /**
+     * 앵커 광고를 주소 타입과 무관하게 통과시키기 위한 이름 필터.
+     *
+     * 배경(2026-07-10 진단): ScanFilter.setDeviceAddress(mac) 1-인자 버전은 주소 타입을
+     * PUBLIC으로 가정한다. 앵커가 랜덤 주소 타입(TxAdd=random)으로 광고하면 필터가
+     * 영원히 안 걸려서, 백그라운드 필터 스캔은 "정상 시작" 후 결과 0건이 된다
+     * (keybox DD:…는 정적 랜덤 대역, LC241 74:…도 랜덤 대역 첫 바이트).
+     * 이름 필터로 광고를 통과시키고, 층 판정은 콜백에서 MAC으로 재검증한다
+     * (같은 이름의 다른 LC241 유닛은 MAC이 앵커 목록에 없으므로 무시됨).
+     */
+    val ANCHOR_NAMES = setOf(
+        "LC241/2/3/CT/SI/PD",    // 2층 조명 컨트롤러 3대 공통 이름
+        "keybox_xxxx",           // 1층 keybox
+        "S71767d2deea6940dC"     // 1층 삼성 기기 7C:72:E7 (3주 로그에서 이름 불변 확인)
+    )
+
     /** 참고용: 도어 비콘 iBeacon UUID (층 구분엔 못 쓰지만 "문 근처" 트리거로 유용) */
     const val DOOR_BEACON_UUID = "cf2409fe-81e4-4e00-f8ee-eeff00000000"
 

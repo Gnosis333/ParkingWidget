@@ -92,6 +92,8 @@ class ParkingWidgetProvider : AppWidgetProvider() {
         }
 
         fun stopMonitor(context: Context) {
+            // 명시적 중지이므로 워치독 알람도 함께 끈다 (안 끄면 알람이 서비스를 부활시킴)
+            BleMonitorService.cancelWatchdog(context)
             context.stopService(Intent(context, BleMonitorService::class.java))
         }
 

@@ -61,6 +61,11 @@
             </intent-filter>
         </receiver>
 
+        <!-- Doze 대응 워치독 (AlarmManager → 서비스 생존 확인·부활) -->
+        <receiver
+            android:name=".WatchdogReceiver"
+            android:exported="false" />
+
         <!-- BLE 상시 스캔 Foreground Service -->
         <service
             android:name=".BleMonitorService"
