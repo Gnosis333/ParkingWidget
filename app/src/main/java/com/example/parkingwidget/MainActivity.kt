@@ -44,6 +44,7 @@ class MainActivity : Activity() {
     companion object {
         private const val SCAN_DURATION_MS = 12_000L
         private const val REQ_CODE = 100
+        private const val REQ_CODE_BG_LOCATION = 101
 
         private const val APPLE_COMPANY_ID = 0x004C
     }
@@ -110,16 +111,30 @@ class MainActivity : Activity() {
         if (!scanning) renderMonitorStatus()
     }
 
-    /** 백그라운드 서비스 가동 여부 + 배터리 최적화 예외 적용 여부를 상태창에 표시 */
+    /**
+     * 백그라운드 위치("항상 허용") 부여 여부.
+     * BLE 스캔 결과는 위치 정보로 취급되어, 이게 없으면 앱이 화면에 없을 때
+     * 스캔 결과가 에러 없이 조용히 차단된다 — 백그라운드 감지의 필수 조건.
+     */
+    private fun hasBackgroundLocation(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
+
+    /** 백그라운드 서비스 가동 여부 + 배터리 최적화 예외 + 백그라운드 위치를 상태창에 표시 */
     private fun renderMonitorStatus() {
         val running = BleMonitorService.isRunning
         val exempt = !isBatteryOptimized()
+        val bgLoc = hasBackgroundLocation()
 
         val sb = StringBuilder()
         sb.append(if (running) "✅ 백그라운드 자동감지: 실행 중" else "⛔ 백그라운드 자동감지: 꺼짐 (아래 버튼으로 켜세요)")
         sb.append("\n")
         sb.append(if (exempt) "✅ 배터리 최적화 예외 적용됨"
                   else "⚠ 배터리 최적화 예외 미적용 — 백그라운드가 꺼질 수 있습니다.")
+        sb.append("\n")
+        sb.append(if (bgLoc) "✅ 위치 항상 허용 적용됨"
+                  else "⛔ 위치가 \"항상 허용\"이 아님 — 백그라운드에서 앵커 수신이 차단됩니다!")
         renderStatus(sb.toString())
 
         if (::monitorButton.isInitialized) {
@@ -160,7 +175,14 @@ class MainActivity : Activity() {
             text = "백그라운드 자동감지 켜기"
             setOnClickListener {
                 ParkingWidgetProvider.startMonitor(this@MainActivity)
-                if (isBatteryOptimized()) {
+                if (!hasBackgroundLocation()) {
+                    // 최우선: 이게 없으면 백그라운드 스캔 결과가 통째로 차단된다.
+                    // Android 11+에선 시스템이 다이얼로그 대신 설정 화면으로 보낸다 →
+                    // 사용자가 "항상 허용" 선택 후 복귀하면 onResume이 상태를 갱신.
+                    renderStatus("백그라운드 자동감지 서비스를 시작했습니다.\n⛔ 위치 권한을 \"항상 허용\"으로 바꿔주세요 — 안 하면 주머니 속에서 앵커 수신이 차단됩니다.")
+                    ActivityCompat.requestPermissions(this@MainActivity,
+                        arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION), REQ_CODE_BG_LOCATION)
+                } else if (isBatteryOptimized()) {
                     // 시스템 예외 허용 다이얼로그 표시. 허용 후 앱으로 돌아오면 onResume 이
                     // 실제 상태를 다시 읽어 "✅ 배터리 최적화 예외 적용됨" 을 표시한다.
                     renderStatus("백그라운드 자동감지 서비스를 시작했습니다.\n⚠ 배터리 최적화 예외를 허용해주세요 (백그라운드 생존).")
@@ -368,6 +390,14 @@ class MainActivity : Activity() {
         if (requestCode == REQ_CODE) {
             val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
             renderStatus(if (granted) "권한 허용됨. 스캔 버튼을 눌러주세요." else "권한이 거부되었습니다. 설정에서 허용해야 스캔할 수 있습니다.")
+        }
+        if (requestCode == REQ_CODE_BG_LOCATION && !hasBackgroundLocation()) {
+            // 이전 거부 이력 등으로 시스템이 요청을 조용히 무시한 경우 → 앱 설정으로 직접 유도
+            renderStatus("설정 → 권한 → 위치에서 \"항상 허용\"을 선택해주세요.")
+            try {
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:$packageName")))
+            } catch (_: Exception) {}
         }
     }
 

@@ -117,10 +117,30 @@ class BleMonitorService : Service() {
         evaluateFloor()
     }
 
+    private var lastUnknownLogAt = 0L
+
+    /**
+     * 앵커 이름인데 MAC이 미등록인 광고 감지 — 앵커 기기가 정전/재부팅으로 MAC이
+     * 바뀌면 이름 필터는 통과하지만 콜백이 조용히 버려서 로그에 아무것도 안 남는
+     * 사각지대가 생긴다. 여기서 새 MAC을 기록해두면 앵커 목록 갱신이 즉시 가능.
+     */
+    private fun checkRenamedAnchor(source: String, result: ScanResult) {
+        val name = result.scanRecord?.deviceName ?: return
+        if (name !in ParkingAnchors.ANCHOR_NAMES) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastUnknownLogAt < ANCHOR_LOG_INTERVAL_MS) return
+        lastUnknownLogAt = now
+        MonitorLog.log(this,
+            "[$source] 앵커 이름인데 미등록 MAC — $name ${result.device.address} rssi=${result.rssi} (앵커 MAC 변경 의심)")
+    }
+
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val mac = result.device.address.uppercase()
-            if (ParkingAnchors.anchorFloor(mac) == 0) return  // 앵커 아니면 무시
+            if (ParkingAnchors.anchorFloor(mac) == 0) {
+                checkRenamedAnchor("백그라운드", result)
+                return
+            }
             onAnchorSeen("백그라운드", mac, result.rssi)
         }
 
@@ -191,12 +211,25 @@ class BleMonitorService : Service() {
     // 무필터 스캔은 화면 꺼짐 상태에선 OS가 차단하지만 이 순간엔 허용된다.
     private var burstScanning = false
     private var lastBurstAt = 0L
+    // 버스트 세션 진단: 뭔가 수신은 됐는지(기기 종수), 그중 앵커는 몇 건인지
+    private val burstSeenMacs = HashSet<String>()
+    private var burstAnchorHits = 0
 
     private val burstCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val mac = result.device.address.uppercase()
-            if (ParkingAnchors.anchorFloor(mac) == 0) return  // 소프트웨어 필터
+            burstSeenMacs.add(mac)
+            if (ParkingAnchors.anchorFloor(mac) == 0) {
+                checkRenamedAnchor("버스트", result)
+                return  // 소프트웨어 필터
+            }
+            burstAnchorHits++
             onAnchorSeen("버스트", mac, result.rssi)
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            MonitorLog.log(this@BleMonitorService, "버스트 onScanFailed errorCode=$errorCode")
+            burstScanning = false
         }
     }
 
@@ -219,6 +252,9 @@ class BleMonitorService : Service() {
             scanner.startScan(null, settings, burstCallback)  // 무필터 = 수동 스캔과 동일
             burstScanning = true
             lastBurstAt = now
+            burstSeenMacs.clear()
+            burstAnchorHits = 0
+            MonitorLog.log(this, "버스트 스캔 시작 (화면 켜짐)")
             handler.removeCallbacks(stopBurstRunnable)
             handler.postDelayed(stopBurstRunnable, BURST_DURATION_MS)
         } catch (e: Exception) {
@@ -236,6 +272,8 @@ class BleMonitorService : Service() {
             (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager)
                 .adapter?.bluetoothLeScanner?.stopScan(burstCallback)
         } catch (_: Exception) {}
+        // 기기 0종 = 스캔이 결과를 아예 못 받음(좀비/차단), 다수 종 + 앵커 0건 = 앵커 부재/변경
+        MonitorLog.log(this, "버스트 스캔 종료 (기기 ${burstSeenMacs.size}종, 앵커 ${burstAnchorHits}건)")
     }
 
     override fun onCreate() {

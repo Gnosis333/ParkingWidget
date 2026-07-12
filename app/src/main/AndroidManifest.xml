@@ -10,6 +10,11 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <!-- Android 11 이하 BLE 스캔에 위치 권한 필요 -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- 백그라운드 BLE 스캔 결과 수신에 필수 ("항상 허용" 위치).
+         BLUETOOTH_SCAN에 neverForLocation을 안 쓰는 한(iBeacon 앵커가 필터링될 수 있어 못 씀)
+         스캔 결과는 위치 정보로 취급되어, 앱이 화면에 없으면 이 권한 없이는
+         에러 없이 조용히 차단된다 (2026-07-12 실측: appops rejectTime으로 확인). -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <!-- 부팅 후 서비스 재시작 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Foreground Service -->
