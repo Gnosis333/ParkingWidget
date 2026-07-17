@@ -15,9 +15,23 @@ object ParkingAnchors {
 
     // 1층에만 잡히는 고정-MAC 기기
     val F1_ANCHORS = setOf(
-        "7C:72:E7:9F:FE:F8",  // 삼성 기기 "S717…"
-        "DD:57:E3:E3:1B:64"   // keybox_xxxx (iBeacon UUID 92428ea0…)
+        "7C:72:E7:9F:FE:F8",  // 삼성 기기 "S717…" — 주민 차량 탑재 추정 (부재 시 감지 공백)
+        "DD:57:E3:E3:1B:64",  // keybox_xxxx (iBeacon UUID 92428ea0…) — 2026-07-17 문 앞에서도 미관측, 소멸 의심
+        "04:EE:03:91:6D:2A"   // "SYEz" — B1 주차구역 -74, 11일간 MAC 불변 (2026-07-17 추가)
     )
+
+    /**
+     * 층 누설 방어: 일부 앵커는 엘리베이터 통로 등으로 반대층까지 약하게 새어 들어간다.
+     * 여기 등록된 앵커는 이 값 이상으로 강할 때만 층 판정에 사용.
+     * SYEz 실측: B1 주차구역 -74 / B2에서는 -93 이하로만 관측 → -85 문턱이면 8dB 마진.
+     */
+    private val MIN_RSSI = mapOf(
+        "04:EE:03:91:6D:2A" to -85
+    )
+
+    /** 층 판정에 이 수신 강도를 인정할지 (문턱 미등록 앵커는 무조건 인정) */
+    fun passes(mac: String, rssi: Int): Boolean =
+        rssi >= (MIN_RSSI[mac.uppercase()] ?: Int.MIN_VALUE)
 
     // 2층에만 잡히는 고정-MAC 기기
     val F2_ANCHORS = setOf(
@@ -41,7 +55,8 @@ object ParkingAnchors {
     val ANCHOR_NAMES = setOf(
         "LC241/2/3/CT/SI/PD",    // 2층 조명 컨트롤러 3대 공통 이름
         "keybox_xxxx",           // 1층 keybox
-        "S71767d2deea6940dC"     // 1층 삼성 기기 7C:72:E7 (3주 로그에서 이름 불변 확인)
+        "S71767d2deea6940dC",    // 1층 삼성 기기 7C:72:E7 (3주 로그에서 이름 불변 확인)
+        "SYEz"                   // 1층 04:EE:03 (주소 타입 불명이라 이름 필터도 병행)
     )
 
     /** 참고용: 도어 비콘 iBeacon UUID (층 구분엔 못 쓰지만 "문 근처" 트리거로 유용) */

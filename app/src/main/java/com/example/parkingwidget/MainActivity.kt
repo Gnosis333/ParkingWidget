@@ -407,9 +407,11 @@ class MainActivity : Activity() {
         statusText.text = msg
     }
 
-    /** 해당 층 앵커 중 가장 강한 것 */
+    /** 해당 층 앵커 중 가장 강한 것 (누설 문턱 통과분만 — 서비스 판정과 동일 기준) */
     private fun bestAnchor(floor: Int): DeviceInfo? =
-        found.values.filter { ParkingAnchors.anchorFloor(it.mac) == floor }.maxByOrNull { it.rssi }
+        found.values.filter {
+            ParkingAnchors.anchorFloor(it.mac) == floor && ParkingAnchors.passes(it.mac, it.rssi)
+        }.maxByOrNull { it.rssi }
 
     /** 가장 강한 도어 비콘 (참고용) */
     private fun bestDoorBeacon(): DeviceInfo? =

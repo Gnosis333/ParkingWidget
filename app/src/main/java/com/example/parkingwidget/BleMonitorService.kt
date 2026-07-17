@@ -105,6 +105,7 @@ class BleMonitorService : Service() {
 
     /** 필터 스캔/버스트 스캔 공용 앵커 처리. source는 진단 로그용("백그라운드"/"버스트"). */
     private fun onAnchorSeen(source: String, mac: String, rssi: Int) {
+        if (!ParkingAnchors.passes(mac, rssi)) return  // 반대층 누설(약신호) 차단
         val now = SystemClock.elapsedRealtime()
         lastAnchorSeen = now
         failBackoffMs = FAIL_BACKOFF_BASE_MS              // 정상 수신 → 백오프 리셋
