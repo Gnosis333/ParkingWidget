@@ -17,3 +17,9 @@ build_log*.txt
 
 # Screenshots / scratch
 screen*.png
+
+# Presentation build artifacts (Claude 디자인 export — 소스는 PRESENTATION.md)
+ppt/
+ppt.zip
+*.dc.html
+*.html
