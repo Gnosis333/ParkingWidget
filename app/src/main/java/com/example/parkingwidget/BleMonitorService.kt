@@ -31,10 +31,22 @@ class BleMonitorService : Service() {
     companion object {
         private const val CHANNEL_ID = "parking_monitor"
         private const val NOTIF_ID = 2001
-        private const val COOLDOWN_MS = 30_000L     // 같은 층 재감지 무시 시간
         // 최근 N초 내 본 앵커만 유효. 1층 keybox처럼 약하고 드물게 잡히는 앵커가
         // 만료돼 판정 불가가 되지 않도록 20→30초로 완화.
         private const val ANCHOR_FRESH_MS = 30_000L
+
+        // ── 층 판정 안정화(히스테리시스) 파라미터 ──
+        // 배경(2026-07-21 로그): B1 keybox(DD:57…1B:64)가 B2 주차자리까지 -79~-92로 강하게
+        // 새어들어와, "최근 창에서 더 강한 층" 단순 비교가 초 단위로 B1↔B2를 수십 번 뒤집었다
+        // (아침엔 결국 B1로 오판정). RSSI만으로는 두 층을 못 가르므로:
+        //  ① 앵커 "개수" 우선 — B2는 LC241 3대, B1은 keybox 1대뿐이라, 서로 다른 앵커가
+        //     더 많이 잡힌 층을 택하면 단일 leak에 휘둘리지 않는다.
+        //  ② 개수가 같을 때만 RSSI 우열로 판정하되, 근소차는 tie로 처리(마진 필요).
+        //  ③ 후보 층이 SWITCH_SUSTAIN_MS 동안 지속돼야 실제 전환(플리커·단발 leak 방어).
+        private const val RSSI_TIEBREAK_DB = 5             // 개수 동수 시 RSSI 우열 인정 최소차(dB)
+        private const val SWITCH_SUSTAIN_MS = 10_000L      // 후보 층이 이만큼 유지돼야 전환
+        // 판정 근거 진단 로그(층별 개수·RSSI) 과다 방지: 같은 상태 유지 로그는 1분에 1회.
+        private const val DECISION_LOG_INTERVAL_MS = 60_000L
 
         // ── 자가치유(안정성) 파라미터 ──
         // 안드로이드/삼성은 오래 도는 BLE 스캔 콜백을 프로세스는 살려둔 채 조용히 무력화한다
@@ -93,8 +105,13 @@ class BleMonitorService : Service() {
     private var lastFloor = 0
     private var lastUpdateTime = 0L
 
-    // 최근 본 앵커: MAC -> (rssi, elapsedRealtime)
+    // 최근 본 앵커: MAC -> (평활 rssi, elapsedRealtime)
     private val recentAnchors = HashMap<String, Pair<Int, Long>>()
+
+    // 히스테리시스: 현재 층과 다른 후보가 언제부터 우세했는지 추적(지속 시간 확인용)
+    private var challengerFloor = 0
+    private var challengerSince = 0L
+    private var lastDecisionLogAt = 0L
 
     private val handler = Handler(Looper.getMainLooper())
     private var scanning = false
@@ -109,7 +126,11 @@ class BleMonitorService : Service() {
         val now = SystemClock.elapsedRealtime()
         lastAnchorSeen = now
         failBackoffMs = FAIL_BACKOFF_BASE_MS              // 정상 수신 → 백오프 리셋
-        recentAnchors[mac] = rssi to now
+        // RSSI 노이즈로 층이 튀지 않게 EWMA 평활(직전 값과 반반). 만료됐으면 새 값으로 시작.
+        val prev = recentAnchors[mac]
+        val smoothed = if (prev != null && now - prev.second <= ANCHOR_FRESH_MS)
+            (prev.first + rssi) / 2 else rssi
+        recentAnchors[mac] = smoothed to now
         // 어느 경로가 앵커를 잡는지 파악하기 위한 레이트리밋 로그
         if (now - lastAnchorLogAt > ANCHOR_LOG_INTERVAL_MS) {
             lastAnchorLogAt = now
@@ -174,25 +195,83 @@ class BleMonitorService : Service() {
         }
     }
 
-    /** 최근 본 앵커들 중 더 강한 층으로 판정해 위젯 갱신 */
+    /**
+     * 최근 본 앵커로 층을 판정해 위젯 갱신.
+     *
+     * 판정: ① 서로 다른 앵커 "개수"가 더 많은 층(단일 leak에 안 휘둘림) →
+     *       ② 동수면 최강 RSSI 우열(근소차는 tie) →
+     *       ③ 그래도 tie면 현재 층 유지.
+     * 전환은 후보 층이 SWITCH_SUSTAIN_MS 지속돼야 확정(플리커·단발 leak 방어).
+     */
     private fun evaluateFloor() {
         val now = SystemClock.elapsedRealtime()
         recentAnchors.entries.removeAll { now - it.value.second > ANCHOR_FRESH_MS }
 
-        val f1Best = recentAnchors.filterKeys { ParkingAnchors.anchorFloor(it) == 1 }
-            .values.maxOfOrNull { it.first }
-        val f2Best = recentAnchors.filterKeys { ParkingAnchors.anchorFloor(it) == 2 }
-            .values.maxOfOrNull { it.first }
+        val f1 = recentAnchors.filterKeys { ParkingAnchors.anchorFloor(it) == 1 }.values
+        val f2 = recentAnchors.filterKeys { ParkingAnchors.anchorFloor(it) == 2 }.values
+        val f1Count = f1.size
+        val f2Count = f2.size
+        if (f1Count == 0 && f2Count == 0) return  // 판단 근거 없음 → 위젯 유지
+        val f1Best = f1.maxOfOrNull { it.first }
+        val f2Best = f2.maxOfOrNull { it.first }
 
-        val floor = when {
-            f1Best == null && f2Best == null -> return
-            f2Best == null || (f1Best != null && f1Best >= f2Best) -> 1
-            else -> 2
+        val candidate = when {
+            f1Count > f2Count -> 1
+            f2Count > f1Count -> 2
+            else -> {  // 개수 동수(양쪽 모두 >0) → RSSI 우열, 근소차·동률은 현재 층 유지
+                val b1 = f1Best ?: Int.MIN_VALUE
+                val b2 = f2Best ?: Int.MIN_VALUE
+                when {
+                    b1 - b2 >= RSSI_TIEBREAK_DB -> 1
+                    b2 - b1 >= RSSI_TIEBREAK_DB -> 2
+                    lastFloor != 0 -> lastFloor
+                    else -> if (b1 >= b2) 1 else 2
+                }
+            }
         }
-        if (floor == lastFloor && now - lastUpdateTime < COOLDOWN_MS) return
+
+        val basis = "B1:${f1Count}개/best=${f1Best ?: "-"} B2:${f2Count}개/best=${f2Best ?: "-"}"
+
+        // 최초 확정(아직 층 없음): 즉시 반영해 위젯을 빠르게 채운다.
+        if (lastFloor == 0) {
+            challengerFloor = 0
+            commitFloor(candidate, now, basis)
+            return
+        }
+
+        // 후보가 현재 층과 같으면 유지, 도전 리셋.
+        if (candidate == lastFloor) {
+            challengerFloor = 0
+            logDecisionThrottled(now, "층 유지 지하${lastFloor}층 ($basis)")
+            return
+        }
+
+        // 후보가 다르면 지속 시간을 확인해 전환 여부 결정(플리커 억제).
+        if (challengerFloor != candidate) {
+            challengerFloor = candidate
+            challengerSince = now
+        }
+        if (now - challengerSince >= SWITCH_SUSTAIN_MS) {
+            challengerFloor = 0
+            commitFloor(candidate, now, basis)
+        } else {
+            logDecisionThrottled(now,
+                "층 유지 지하${lastFloor}층 — 후보 지하${candidate}층 지속대기 ($basis)")
+        }
+    }
+
+    private fun commitFloor(floor: Int, now: Long, basis: String) {
         lastFloor = floor
         lastUpdateTime = now
+        MonitorLog.log(this, "층 판정 → 지하 ${floor}층 [$basis]")
         saveAndUpdateWidget(floor)
+    }
+
+    /** 유지/대기 상태 진단 로그 — 근소차·leak 상황을 나중에 분석할 수 있게 1분 1회만 남긴다. */
+    private fun logDecisionThrottled(now: Long, msg: String) {
+        if (now - lastDecisionLogAt < DECISION_LOG_INTERVAL_MS) return
+        lastDecisionLogAt = now
+        MonitorLog.log(this, msg)
     }
 
     // BT 켜짐/꺼짐 감지 → 스캔 재시작
@@ -370,7 +449,7 @@ class BleMonitorService : Service() {
     }
 
     private fun saveAndUpdateWidget(floor: Int) {
-        MonitorLog.log(this, "층 판정 → 지하 ${floor}층 (위젯 갱신)")
+        // 판정 로그는 commitFloor에서 근거(개수·RSSI)와 함께 남긴다.
         getSharedPreferences("ParkingWidgetPrefs", MODE_PRIVATE)
             .edit().putInt("SelectedFloor", floor).apply()
 
