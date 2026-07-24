@@ -211,7 +211,18 @@ class BleMonitorService : Service() {
         val f2 = recentAnchors.filterKeys { ParkingAnchors.anchorFloor(it) == 2 }.values
         val f1Count = f1.size
         val f2Count = f2.size
-        if (f1Count == 0 && f2Count == 0) return  // 판단 근거 없음 → 위젯 유지
+        if (f1Count == 0 && f2Count == 0) return  // 판단 근거 없음 → 위젯 유지(수동 override 보존)
+
+        // 위젯에 저장된 층이 서비스 메모리와 다르면 = 사용자가 위젯을 수동 탭한 것.
+        // 그 값을 채택해, 자동 판정이 사용자의 최신 선택을 기준으로 이어가게 한다.
+        // (안 하면 수동 B1 후 다음날 B2에서 "이미 2층"으로 오인해 위젯을 안 고침)
+        val persisted = getSharedPreferences("ParkingWidgetPrefs", MODE_PRIVATE)
+            .getInt("SelectedFloor", lastFloor)
+        if (persisted != lastFloor) {
+            lastFloor = persisted
+            challengerFloor = 0
+        }
+
         val f1Best = f1.maxOfOrNull { it.first }
         val f2Best = f2.maxOfOrNull { it.first }
 
