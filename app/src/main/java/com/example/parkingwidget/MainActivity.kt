@@ -135,10 +135,35 @@ class MainActivity : Activity() {
         sb.append("\n")
         sb.append(if (bgLoc) "✅ 위치 항상 허용 적용됨"
                   else "⛔ 위치가 \"항상 허용\"이 아님 — 백그라운드에서 앵커 수신이 차단됩니다!")
+        sb.append("\n")
+        sb.append(parkingStateLine())
         renderStatus(sb.toString())
 
         if (::monitorButton.isInitialized) {
             monitorButton.text = if (running) "백그라운드 자동감지 재시작" else "백그라운드 자동감지 켜기"
+        }
+    }
+
+    /**
+     * 주차 이벤트(차량 BT 해제) 대비 층 확정 시각 — 위젯이 왜 그 값을 보여주는지 한 줄로 설명한다.
+     * "주차는 감지됐는데 확정이 없다"가 곧 앵커 커버리지 구멍의 신호다.
+     */
+    private fun parkingStateLine(): String {
+        val hhmm = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.KOREA)
+        val parked = ParkingState.parkedAt(this)
+        val fixed = ParkingState.fixedAt(this)
+        val floor = ParkingState.floor(this)
+        val floorTxt = if (floor == 0) "없음" else "지하${floor}층"
+        return when {
+            parked == 0L && fixed == 0L -> "ℹ 표시 층: $floorTxt (주차 이벤트 기록 없음)"
+            ParkingState.isUnconfirmed(this) ->
+                "⚠ 표시 층: $floorTxt — 미확인! ${hhmm.format(parked)} 주차 감지 후 앵커 미수신 " +
+                    "(마지막 확정 ${if (fixed == 0L) "없음" else hhmm.format(fixed)})"
+            parked > 0L && fixed >= parked ->
+                "✅ 표시 층: $floorTxt — ${hhmm.format(parked)} 주차 건으로 확정 (${hhmm.format(fixed)})"
+            parked > 0L ->
+                "⏳ 표시 층: $floorTxt — ${hhmm.format(parked)} 주차 감지, 확인 중"
+            else -> "ℹ 표시 층: $floorTxt (마지막 확정 ${hhmm.format(fixed)}, 운행 중)"
         }
     }
 

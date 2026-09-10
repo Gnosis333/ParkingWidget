@@ -23,6 +23,9 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Android 14+: Bluetooth foreground service 타입 선언 필요 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- 주차 순간(차량 BT 해제) 집중 스캔 동안만 CPU를 붙잡아 둔다 — 화면 꺼짐 상태에서
+         결과 콜백을 받으려면 필요. 90초 타임아웃을 걸어 새더라도 배터리를 못 먹게 했다. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
@@ -57,12 +60,13 @@
                 android:resource="@xml/parking_widget_info" />
         </receiver>
 
-        <!-- 부팅 후 상시 스캔 서비스 재시작 -->
+        <!-- 부팅·앱 업데이트 후 상시 스캔 서비스 재시작 -->
         <receiver
             android:name=".BootReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 
@@ -70,6 +74,17 @@
         <receiver
             android:name=".WatchdogReceiver"
             android:exported="false" />
+
+        <!-- 주차 이벤트 백업 경로: 서비스가 죽어 있을 때 차량 BT 해제로 서비스를 깨운다.
+             ACL_CONNECTED/DISCONNECTED는 암시적 브로드캐스트 제한의 예외라 매니페스트 등록이 유효. -->
+        <receiver
+            android:name=".CarReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
+            </intent-filter>
+        </receiver>
 
         <!-- BLE 상시 스캔 Foreground Service -->
         <service

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- "이번 주차 건에서 층을 확인 못 함" 상태.
+     확정(초록 채움)과 미선택(회색)의 어느 쪽으로도 안 읽히도록 호박색 점선 테두리로 구분한다. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#1FFFC107"/>
+    <corners android:radius="12dp"/>
+    <stroke android:width="2dp" android:color="#FFC107" android:dashWidth="6dp" android:dashGap="4dp"/>
+</shape>
