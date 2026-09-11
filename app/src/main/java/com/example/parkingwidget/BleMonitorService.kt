@@ -73,6 +73,16 @@ class BleMonitorService : Service() {
         //     (2026-09-10: 20:35:47 주차 → 앵커 0건 → 위젯이 7시간 전 값을 그대로 표시)
         //     주차 순간 90초 무필터 스캔 + 부분 웨이크락으로 확실한 관측 창을 만든다.
         private const val PARKING_BURST_MS = 90_000L
+        /**
+         * 주차 순간에 인정할 "직전 근거"의 유효 시간.
+         *
+         * 주차 직전 차를 세우는 몇 초 사이에 앵커가 잡히는 일이 흔하다
+         * (2026-09-11: BT 해제 2초 전 D4:3E:B5 -94 수신 → 그 근거로 즉시 확정).
+         * 그래서 주차 이벤트에서 최근 근거를 통째로 버리면 안 된다.
+         * 다만 일반 창(30초)을 그대로 쓰면 B2로 내려오는 길에 스친 B1 앵커가 남아
+         * 엉뚱한 층으로 즉시 확정될 수 있어, 주차 판정에만 절반으로 좁혀 쓴다.
+         */
+        private const val PARKING_EVIDENCE_MS = 15_000L
         /** onStartCommand로 전달되는 주차 이벤트 (서비스가 죽어 있었을 때 CarReceiver가 사용) */
         const val EXTRA_PARKING_EVENT = "parking_event"
         const val EXTRA_PARKING_LABEL = "parking_label"
@@ -343,11 +353,15 @@ class BleMonitorService : Service() {
         // 직전 층은 다른 주차 건의 값이다. 근거를 비우고 첫 수신에 즉시 확정하도록 전환.
         parkingPending = true
         challengerFloor = 0
-        recentAnchors.clear()
+        // 직전 15초 근거는 "차를 세운 그 자리"의 증거라 살려둔다 (통째로 비우면 방금 받은
+        // 수신을 버리게 된다). 그보다 오래된 것만 램프에서 스친 흔적으로 보고 버린다.
+        val cutoff = SystemClock.elapsedRealtime()
+        recentAnchors.entries.removeAll { cutoff - it.value.second > PARKING_EVIDENCE_MS }
         // 강등·좀비 상태일 수 있는 필터 스캔부터 되살린다. 단 방금(onStartCommand 경로) 시작했으면
         // 건너뛴다 — 프레임워크가 30초에 5회 넘는 스캔 시작을 막기 때문에 낭비할 여유가 없다.
         if (SystemClock.elapsedRealtime() - lastScanStartAt > 3_000L) restartScan()
         startBurstScan("주차 감지", PARKING_BURST_MS, force = true, keepAwake = true)
+        evaluateFloor()   // 살려둔 직전 근거가 있으면 스캔 결과를 기다리지 않고 바로 확정
         // 유예 시간이 지나도 확정이 없으면 위젯을 "미확인"으로 다시 그린다.
         handler.removeCallbacks(unconfirmedRunnable)
         handler.postDelayed(unconfirmedRunnable, ParkingState.UNCONFIRMED_GRACE_MS + 1_000L)
