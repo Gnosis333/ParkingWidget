@@ -83,6 +83,23 @@ class BleMonitorService : Service() {
          * 엉뚱한 층으로 즉시 확정될 수 있어, 주차 판정에만 절반으로 좁혀 쓴다.
          */
         private const val PARKING_EVIDENCE_MS = 15_000L
+
+        // ── 도어비콘 역추론 (앵커가 하나도 안 잡힌 주차 건 구제) ──
+        // 근거(2026-09-13, 수동 스캔 33세션 집계):
+        //  ① 1층은 앵커가 사실상 2대뿐이라 16세션 중 6세션이 "근거 0건"이었다.
+        //  ② 그중 2세션은 도어비콘이 -60/-68dBm으로 또렷이 들렸다 → 차고 안이라는 건 알 수 있다.
+        //  ③ 2층에서 도어비콘이 들린 8세션은 전부 LC241도 같이 들렸다(8/8).
+        // → "차고 문 앞인데 B2 앵커가 한참 조용하다"면 1층일 공산이 크다.
+        // 오판정을 최소화하려고 범위를 좁게 건다:
+        //  · 주차 직후(PARKING_INFER_WINDOW_MS)에만, 그것도 앵커 근거가 전혀 없을 때만
+        //  · 도어비콘을 DOOR_SUSTAIN_MS 이상 연속으로 듣고 있어야 하며
+        //  · B2 앵커가 DOOR_B2_QUIET_MS 동안 완전히 조용했어야 한다
+        // 그리고 이 판정은 "확정"으로 치지 않는다 — 층 표시만 바꾸고 위젯의 미확인('?')은
+        // 그대로 둬서, 앵커 없이 추론한 값임이 사용자에게 계속 보이게 한다.
+        private const val DOOR_SUSTAIN_MS = 30_000L         // 도어비콘 연속 수신 요구 시간
+        private const val DOOR_GAP_MS = 20_000L             // 이보다 끊기면 연속 수신이 깨진 것
+        private const val DOOR_B2_QUIET_MS = 120_000L       // B2 앵커가 이만큼 조용해야 인정
+        private const val PARKING_INFER_WINDOW_MS = 5 * 60_000L  // 주차 후 이 시간 안에서만 추론
         /** onStartCommand로 전달되는 주차 이벤트 (서비스가 죽어 있었을 때 CarReceiver가 사용) */
         const val EXTRA_PARKING_EVENT = "parking_event"
         const val EXTRA_PARKING_LABEL = "parking_label"
@@ -136,6 +153,13 @@ class BleMonitorService : Service() {
     // 주차 이벤트 직후 "아직 이번 주차 건의 층을 모르는" 상태.
     // true인 동안 첫 근거가 잡히면 히스테리시스 없이 즉시 확정한다.
     private var parkingPending = false
+    private var parkedAt = 0L               // 마지막 주차 이벤트(elapsedRealtime)
+    private var parkingGuessed = false      // 이번 주차 건에 도어비콘 추론을 이미 적용했는지
+
+    // 도어비콘 연속 수신 추적 (끊기면 firstSeen을 다시 잡는다)
+    private var doorFirstSeenAt = 0L
+    private var doorLastSeenAt = 0L
+    private var lastF2AnchorAt = 0L         // B2 앵커를 마지막으로 본 시각
 
     private val handler = Handler(Looper.getMainLooper())
     private var scanning = false
@@ -150,6 +174,7 @@ class BleMonitorService : Service() {
         if (!ParkingAnchors.passes(mac, rssi)) return  // 반대층 누설(약신호) 차단
         val now = SystemClock.elapsedRealtime()
         lastAnchorSeen = now
+        if (ParkingAnchors.anchorFloor(mac) == 2) lastF2AnchorAt = now   // 도어비콘 추론의 안전장치
         failBackoffMs = FAIL_BACKOFF_BASE_MS              // 정상 수신 → 백오프 리셋
         // RSSI 노이즈로 층이 튀지 않게 EWMA 평활(직전 값과 반반). 만료됐으면 새 값으로 시작.
         val prev = recentAnchors[mac]
@@ -164,6 +189,38 @@ class BleMonitorService : Service() {
         evaluateFloor()
     }
 
+    /**
+     * 도어비콘 수신 — "차고 문 앞"이라는 것만 알려준다(1·2층 UUID 동일).
+     * 연속 수신 구간을 추적해두고, 앵커가 전혀 없는 주차 건에 한해 층 추론에 쓴다.
+     */
+    private fun onDoorBeaconSeen() {
+        val now = SystemClock.elapsedRealtime()
+        if (doorLastSeenAt == 0L || now - doorLastSeenAt > DOOR_GAP_MS) doorFirstSeenAt = now
+        doorLastSeenAt = now
+        maybeInferFloorFromDoor(now)
+    }
+
+    /**
+     * 도어비콘만 있고 앵커는 없는 상태에서의 층 추론.
+     * 확정(commitFloor)이 아니라 "추정 표시"다 — 확정 시각을 남기지 않으므로 위젯의
+     * 미확인 표시('1F?')는 유지되고, 나중에 진짜 앵커가 잡히면 그때 확정으로 덮인다.
+     */
+    private fun maybeInferFloorFromDoor(now: Long) {
+        if (!parkingPending || parkingGuessed) return                       // 주차 건에 한해 1회
+        if (now - parkedAt > PARKING_INFER_WINDOW_MS) return                // 주차 직후에만
+        if (now - doorFirstSeenAt < DOOR_SUSTAIN_MS) return                 // 스쳐 지나간 건 제외
+        if (lastF2AnchorAt != 0L && now - lastF2AnchorAt < DOOR_B2_QUIET_MS) return  // B2 침묵 확인
+        recentAnchors.entries.removeAll { now - it.value.second > ANCHOR_FRESH_MS }
+        if (recentAnchors.isNotEmpty()) return                              // 앵커 근거가 있으면 그쪽이 우선
+
+        parkingGuessed = true
+        MonitorLog.log(this,
+            "도어비콘 추론 → 지하 1층 (앵커 0건, 도어비콘 ${(now - doorFirstSeenAt) / 1000}초 연속, " +
+                "B2 앵커 ${if (lastF2AnchorAt == 0L) "기록 없음" else "${(now - lastF2AnchorAt) / 1000}초 무음"}) — 미확인 유지")
+        ParkingState.setGuess(this, 1)   // 확정 시각은 남기지 않는다 → 위젯은 '1F?'
+        ParkingWidgetProvider.refreshAll(this)
+    }
+
     private var lastUnknownLogAt = 0L
 
     /**
@@ -171,6 +228,10 @@ class BleMonitorService : Service() {
      * 바뀌면 이름 필터는 통과하지만 콜백이 조용히 버려서 로그에 아무것도 안 남는
      * 사각지대가 생긴다. 여기서 새 MAC을 기록해두면 앵커 목록 갱신이 즉시 가능.
      */
+    private fun isDoorBeacon(result: ScanResult): Boolean =
+        ParkingAnchors.isDoorBeacon(
+            result.scanRecord?.getManufacturerSpecificData(ParkingAnchors.APPLE_COMPANY_ID))
+
     private fun checkRenamedAnchor(source: String, result: ScanResult) {
         val name = result.scanRecord?.deviceName ?: return
         if (name !in ParkingAnchors.ANCHOR_NAMES) return
@@ -185,7 +246,7 @@ class BleMonitorService : Service() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val mac = result.device.address.uppercase()
             if (ParkingAnchors.anchorFloor(mac) == 0) {
-                checkRenamedAnchor("백그라운드", result)
+                if (isDoorBeacon(result)) onDoorBeaconSeen() else checkRenamedAnchor("백그라운드", result)
                 return
             }
             onAnchorSeen("백그라운드", mac, result.rssi)
@@ -352,6 +413,8 @@ class BleMonitorService : Service() {
         ParkingState.markParked(this)
         // 직전 층은 다른 주차 건의 값이다. 근거를 비우고 첫 수신에 즉시 확정하도록 전환.
         parkingPending = true
+        parkingGuessed = false
+        parkedAt = SystemClock.elapsedRealtime()
         challengerFloor = 0
         // 직전 15초 근거는 "차를 세운 그 자리"의 증거라 살려둔다 (통째로 비우면 방금 받은
         // 수신을 버리게 된다). 그보다 오래된 것만 램프에서 스친 흔적으로 보고 버린다.
@@ -371,6 +434,7 @@ class BleMonitorService : Service() {
     private fun onDriveStarted(label: String) {
         MonitorLog.log(this, "출차 감지 (차량 BT 연결: $label)")
         parkingPending = false
+        parkingGuessed = false
         handler.removeCallbacks(unconfirmedRunnable)
         ParkingState.clearParked(this)
         ParkingWidgetProvider.refreshAll(this)
@@ -400,7 +464,7 @@ class BleMonitorService : Service() {
             val mac = result.device.address.uppercase()
             burstSeenMacs.add(mac)
             if (ParkingAnchors.anchorFloor(mac) == 0) {
-                checkRenamedAnchor("버스트", result)
+                if (isDoorBeacon(result)) onDoorBeaconSeen() else checkRenamedAnchor("버스트", result)
                 return  // 소프트웨어 필터
             }
             burstAnchorHits++
@@ -564,7 +628,12 @@ class BleMonitorService : Service() {
                 ScanFilter.Builder().setDeviceAddress(mac).build()
             } + ParkingAnchors.ANCHOR_NAMES.map { name ->
                 ScanFilter.Builder().setDeviceName(name).build()
-            }
+            } + ScanFilter.Builder()   // 도어비콘: 이름 없고 MAC이 회전 → 제조사 데이터로만 걸린다
+                .setManufacturerData(
+                    ParkingAnchors.APPLE_COMPANY_ID,
+                    ParkingAnchors.DOOR_BEACON_PREFIX,
+                    ParkingAnchors.DOOR_BEACON_MASK)
+                .build()
         } catch (e: Exception) { null }  // 일부 기기 ScanFilter 예외 방어
 
         val scanner = btAdapter.bluetoothLeScanner ?: return

@@ -16,7 +16,8 @@ object ParkingAnchors {
     // 1층에만 잡히는 고정-MAC 기기
     val F1_ANCHORS = setOf(
         "7C:72:E7:9F:FE:F8",  // 삼성 기기 "S717…" — 주민 차량 탑재 추정 (부재 시 감지 공백)
-        "DD:57:E3:E3:1B:64"   // keybox_xxxx (iBeacon UUID 92428ea0…) — 2026-07-17 문 앞에서도 미관측, 소멸 의심
+        "DD:57:E3:E3:1B:64"   // keybox_xxxx (iBeacon UUID 92428ea0…) — 간헐 송출. 07-08~07-26 9세션 연속
+                              //   미관측이라 소멸로 의심했으나 09-13 -88dBm/28hits로 재관측됨. 살아는 있다.
         // "04:EE:03:91:6D:2A" (SYEz) 제거 (2026-07-20): 고정 앵커가 아니라 이동하는 애플 Find My
         //   기기(mfg 0x4c:0218…)였음. 07-20 B2 도착 시 이 MAC이 사용자 옆(-40~-64)에서 잡혀
         //   B1 오판정 유발. 진짜 B2 앵커(LC241)는 주차자리에서 -91~-94뿐이라 문턱에 걸려 B2 확정 실패.
@@ -63,6 +64,26 @@ object ParkingAnchors {
 
     /** 참고용: 도어 비콘 iBeacon UUID (층 구분엔 못 쓰지만 "문 근처" 트리거로 유용) */
     const val DOOR_BEACON_UUID = "cf2409fe-81e4-4e00-f8ee-eeff00000000"
+
+    const val APPLE_COMPANY_ID = 0x004C
+
+    /**
+     * 도어 비콘 판별용 iBeacon 프리픽스: 02 15 + UUID 16바이트.
+     *
+     * 도어 비콘은 이름이 없고 MAC을 30~40분마다 바꾸므로 MAC·이름 필터로는 못 잡는다.
+     * 제조사 데이터(0x004C) 프리픽스로만 걸린다.
+     */
+    val DOOR_BEACON_PREFIX: ByteArray = byteArrayOf(0x02, 0x15) +
+        DOOR_BEACON_UUID.replace("-", "").chunked(2)
+            .map { it.toInt(16).toByte() }.toByteArray()
+
+    val DOOR_BEACON_MASK: ByteArray = ByteArray(DOOR_BEACON_PREFIX.size) { 0xFF.toByte() }
+
+    /** 광고 제조사 데이터가 도어 비콘인지 (0x004C 애플 iBeacon 프리픽스 일치) */
+    fun isDoorBeacon(appleData: ByteArray?): Boolean {
+        if (appleData == null || appleData.size < DOOR_BEACON_PREFIX.size) return false
+        return DOOR_BEACON_PREFIX.indices.all { appleData[it] == DOOR_BEACON_PREFIX[it] }
+    }
 
     /** MAC → 층(1/2), 앵커 아니면 0 */
     fun anchorFloor(mac: String): Int = when (mac.uppercase()) {

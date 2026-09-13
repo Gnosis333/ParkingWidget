@@ -40,6 +40,16 @@ object ParkingState {
         prefs(context).edit().putInt(KEY_FLOOR, floor).putLong(KEY_FIXED_AT, at).apply()
     }
 
+    /**
+     * 추정 층 표시 — 확정 시각을 남기지 않는다.
+     *
+     * 도어비콘 역추론처럼 앵커 없이 얻은 값에 쓴다. 표시되는 층만 바뀌고 "이번 주차 건
+     * 미확인" 상태는 그대로라, 위젯은 계속 물음표를 달고 나온다(= 참고용 추정임을 드러냄).
+     */
+    fun setGuess(context: Context, floor: Int) {
+        prefs(context).edit().putInt(KEY_FLOOR, floor).apply()
+    }
+
     /** 주차 이벤트(차량 BT 해제) 기록 — 이 시각 이후의 확정만 "이번 주차 건"으로 인정된다. */
     fun markParked(context: Context, at: Long = System.currentTimeMillis()) {
         prefs(context).edit().putLong(KEY_PARKED_AT, at).apply()
