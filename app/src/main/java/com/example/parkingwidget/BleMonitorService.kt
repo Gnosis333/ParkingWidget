@@ -371,6 +371,8 @@ class BleMonitorService : Service() {
         lastUpdateTime = now
         MonitorLog.log(this, "층 판정 → 지하 ${floor}층 [$basis]")
         saveAndUpdateWidget(floor)
+        // 앵커로 확정됐다 = 집 차고 안이 확실하다 → 외부 주차 판별용 집 좌표를 갱신한다.
+        HomeLocation.learn(this)
     }
 
     /** 유지/대기 상태 진단 로그 — 근소차·leak 상황을 나중에 분석할 수 있게 1분 1회만 남긴다. */
@@ -409,6 +411,18 @@ class BleMonitorService : Service() {
 
     /** 주차 완료 순간: 이번 주차 건을 "미확정"으로 초기화하고 집중 스캔을 건다. */
     private fun onParked(label: String) {
+        // 집 차고 밖이면 층 자체가 의미 없다 → 집중 스캔도 미확인 경고도 생략.
+        // (위치를 모르면 null이 와서 아래 기존 경로로 간다 — 경고를 잃지 않는 쪽으로 fail-open)
+        HomeLocation.awayDistanceOrNull(this)?.let { away ->
+            MonitorLog.log(this,
+                "주차 감지 (차량 BT 해제: $label) — 집에서 ${away.toInt()}m, 외부 주차로 보고 집중 스캔·미확인 생략")
+            parkingPending = false
+            parkingGuessed = false
+            handler.removeCallbacks(unconfirmedRunnable)
+            ParkingState.clearParked(this)
+            ParkingWidgetProvider.refreshAll(this)
+            return
+        }
         MonitorLog.log(this, "주차 감지 (차량 BT 해제: $label) → 집중 스캔 ${PARKING_BURST_MS / 1000}초")
         ParkingState.markParked(this)
         // 직전 층은 다른 주차 건의 값이다. 근거를 비우고 첫 수신에 즉시 확정하도록 전환.

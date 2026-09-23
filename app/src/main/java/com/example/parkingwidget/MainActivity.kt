@@ -137,6 +137,8 @@ class MainActivity : Activity() {
                   else "⛔ 위치가 \"항상 허용\"이 아님 — 백그라운드에서 앵커 수신이 차단됩니다!")
         sb.append("\n")
         sb.append(parkingStateLine())
+        sb.append("\n")
+        sb.append(HomeLocation.describe(this))
         renderStatus(sb.toString())
 
         if (::monitorButton.isInitialized) {
