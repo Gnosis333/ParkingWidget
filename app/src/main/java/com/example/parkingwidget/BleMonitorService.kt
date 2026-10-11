@@ -71,7 +71,10 @@ class BleMonitorService : Service() {
         //  ⑥ 주차 이벤트 집중 스캔: 차량 오디오 BT가 끊기는 순간 = 시동 끔 = 주차 완료.
         //     이때 화면이 꺼져 있으면 버스트 트리거(화면 켜짐)가 안 걸려 관측 기회가 0이다.
         //     (2026-09-10: 20:35:47 주차 → 앵커 0건 → 위젯이 7시간 전 값을 그대로 표시)
-        //     주차 순간 90초 무필터 스캔 + 부분 웨이크락으로 확실한 관측 창을 만든다.
+        //     주차 순간 90초 무필터 스캔으로 관측 창을 넓힌다 — 단 화면이 켜져 있을 때만.
+        //     (2026-10-11 실측: 화면 꺼진 채 띄운 주차 버스트는 2/2회 "기기 0종" — OS가 화면꺼짐
+        //      무필터 스캔을 결과 0건으로 막는다. 웨이크락으로 CPU를 깨워둬도 소용없었다.
+        //      화면 꺼짐 구간은 필터 스캔이 맡고, 실제로 10-05 B1 확정도 필터 스캔이 잡았다.)
         private const val PARKING_BURST_MS = 90_000L
         /**
          * 주차 순간에 인정할 "직전 근거"의 유효 시간.
@@ -161,6 +164,11 @@ class BleMonitorService : Service() {
     private var doorLastSeenAt = 0L
     private var lastF2AnchorAt = 0L         // B2 앵커를 마지막으로 본 시각
 
+    // 주차 건별 도어비콘 진단: 추론이 안 걸렸을 때 "안 들렸나 vs 연속 수신 조건 미달인가"를
+    // 가르기 위한 기록 (2026-10-10/11 B1 미확인 2건은 이게 없어서 원인을 못 갈랐다).
+    private var parkDoorHits = 0
+    private var parkDoorLongestMs = 0L
+
     private val handler = Handler(Looper.getMainLooper())
     private var scanning = false
     private var lastScanStartAt = 0L                    // 직전 필터 스캔 시작 시각(중복 재시작 억제)
@@ -197,7 +205,24 @@ class BleMonitorService : Service() {
         val now = SystemClock.elapsedRealtime()
         if (doorLastSeenAt == 0L || now - doorLastSeenAt > DOOR_GAP_MS) doorFirstSeenAt = now
         doorLastSeenAt = now
+        if (parkingPending && now - parkedAt <= PARKING_INFER_WINDOW_MS) {
+            parkDoorHits++
+            parkDoorLongestMs = maxOf(parkDoorLongestMs, now - doorFirstSeenAt)
+        }
         maybeInferFloorFromDoor(now)
+    }
+
+    /**
+     * 추론 창이 끝났는데 앵커도 추론도 없었던 주차 건의 도어비콘 요약.
+     * 어느 조건에서 막혔는지 남겨, 다음 미확인 때 문턱 조정 여부를 판단할 수 있게 한다.
+     */
+    private val doorSummaryRunnable = Runnable {
+        if (!parkingPending || parkingGuessed) return@Runnable   // 앵커 확정 or 추론 완료 → 요약 불필요
+        val now = SystemClock.elapsedRealtime()
+        val b2 = if (lastF2AnchorAt == 0L) "기록 없음" else "${(now - lastF2AnchorAt) / 1000}초 무음"
+        MonitorLog.log(this,
+            "도어비콘 추론 불가 — 주차 후 ${PARKING_INFER_WINDOW_MS / 60_000}분간 도어비콘 ${parkDoorHits}건, " +
+                "최장 연속 ${parkDoorLongestMs / 1000}초(요구 ${DOOR_SUSTAIN_MS / 1000}초), B2 앵커 $b2")
     }
 
     /**
@@ -419,16 +444,21 @@ class BleMonitorService : Service() {
             parkingPending = false
             parkingGuessed = false
             handler.removeCallbacks(unconfirmedRunnable)
+            handler.removeCallbacks(doorSummaryRunnable)
             ParkingState.clearParked(this)
             ParkingWidgetProvider.refreshAll(this)
             return
         }
-        MonitorLog.log(this, "주차 감지 (차량 BT 해제: $label) → 집중 스캔 ${PARKING_BURST_MS / 1000}초")
+        val screenOn = (getSystemService(POWER_SERVICE) as PowerManager).isInteractive
+        MonitorLog.log(this, "주차 감지 (차량 BT 해제: $label) → " +
+            if (screenOn) "집중 스캔 ${PARKING_BURST_MS / 1000}초" else "화면 꺼짐 — 필터 스캔만 (무필터 버스트 생략)")
         ParkingState.markParked(this)
         // 직전 층은 다른 주차 건의 값이다. 근거를 비우고 첫 수신에 즉시 확정하도록 전환.
         parkingPending = true
         parkingGuessed = false
         parkedAt = SystemClock.elapsedRealtime()
+        parkDoorHits = 0
+        parkDoorLongestMs = 0L
         challengerFloor = 0
         // 직전 15초 근거는 "차를 세운 그 자리"의 증거라 살려둔다 (통째로 비우면 방금 받은
         // 수신을 버리게 된다). 그보다 오래된 것만 램프에서 스친 흔적으로 보고 버린다.
@@ -437,11 +467,14 @@ class BleMonitorService : Service() {
         // 강등·좀비 상태일 수 있는 필터 스캔부터 되살린다. 단 방금(onStartCommand 경로) 시작했으면
         // 건너뛴다 — 프레임워크가 30초에 5회 넘는 스캔 시작을 막기 때문에 낭비할 여유가 없다.
         if (SystemClock.elapsedRealtime() - lastScanStartAt > 3_000L) restartScan()
-        startBurstScan("주차 감지", PARKING_BURST_MS, force = true, keepAwake = true)
+        // 화면이 꺼져 있으면 무필터 스캔은 결과 0건이다. 나중에 화면을 켜면 화면 켜짐 버스트가 뜬다.
+        if (screenOn) startBurstScan("주차 감지", PARKING_BURST_MS, force = true)
         evaluateFloor()   // 살려둔 직전 근거가 있으면 스캔 결과를 기다리지 않고 바로 확정
         // 유예 시간이 지나도 확정이 없으면 위젯을 "미확인"으로 다시 그린다.
         handler.removeCallbacks(unconfirmedRunnable)
         handler.postDelayed(unconfirmedRunnable, ParkingState.UNCONFIRMED_GRACE_MS + 1_000L)
+        handler.removeCallbacks(doorSummaryRunnable)
+        handler.postDelayed(doorSummaryRunnable, PARKING_INFER_WINDOW_MS + 1_000L)
     }
 
     /** 출차: 운행 중엔 층 값이 의미 없으므로 미확인 표시를 내린다. */
@@ -450,6 +483,7 @@ class BleMonitorService : Service() {
         parkingPending = false
         parkingGuessed = false
         handler.removeCallbacks(unconfirmedRunnable)
+        handler.removeCallbacks(doorSummaryRunnable)
         ParkingState.clearParked(this)
         ParkingWidgetProvider.refreshAll(this)
     }
@@ -468,17 +502,18 @@ class BleMonitorService : Service() {
     // 무필터 스캔은 화면 꺼짐 상태에선 OS가 차단하지만 이 순간엔 허용된다.
     private var burstScanning = false
     private var lastBurstAt = 0L
-    private var wakeLock: PowerManager.WakeLock? = null
-    // 버스트 세션 진단: 뭔가 수신은 됐는지(기기 종수), 그중 앵커는 몇 건인지
+    // 버스트 세션 진단: 뭔가 수신은 됐는지(기기 종수), 그중 앵커·도어비콘은 몇 건인지
     private val burstSeenMacs = HashSet<String>()
     private var burstAnchorHits = 0
+    private var burstDoorHits = 0
 
     private val burstCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val mac = result.device.address.uppercase()
             burstSeenMacs.add(mac)
             if (ParkingAnchors.anchorFloor(mac) == 0) {
-                if (isDoorBeacon(result)) onDoorBeaconSeen() else checkRenamedAnchor("버스트", result)
+                if (isDoorBeacon(result)) { burstDoorHits++; onDoorBeaconSeen() }
+                else checkRenamedAnchor("버스트", result)
                 return  // 소프트웨어 필터
             }
             burstAnchorHits++
@@ -502,26 +537,24 @@ class BleMonitorService : Service() {
      *
      * @param force 최소 간격·진행 중 여부를 무시(주차 이벤트처럼 놓치면 안 되는 순간).
      *              이미 돌고 있으면 종료 시각만 연장한다.
-     * @param keepAwake 화면이 꺼진 상태에서도 결과를 받도록 부분 웨이크락 유지.
-     *              (주차 순간엔 폰이 주머니 속·화면 꺼짐이라 CPU가 다시 잠들 수 있다)
+     *
+     * 화면이 켜져 있을 때만 의미가 있다 — 화면 꺼짐 무필터 스캔은 OS가 결과 0건으로 막고,
+     * 웨이크락으로 CPU를 깨워둬도 풀리지 않았다(2026-10-05/10-11 주차 버스트 "기기 0종").
      */
     @SuppressLint("MissingPermission")
     private fun startBurstScan(
         reason: String,
         durationMs: Long = BURST_DURATION_MS,
-        force: Boolean = false,
-        keepAwake: Boolean = false
+        force: Boolean = false
     ) {
         val now = SystemClock.elapsedRealtime()
         if (!force && (burstScanning || now - lastBurstAt < BURST_MIN_INTERVAL_MS)) return
         if (burstScanning) {   // force + 이미 진행 중 → 시간만 연장
-            if (keepAwake) acquireBurstWakeLock(durationMs)
             handler.removeCallbacks(stopBurstRunnable)
             handler.postDelayed(stopBurstRunnable, durationMs)
             MonitorLog.log(this, "버스트 스캔 연장 ($reason)")
             return
         }
-        // 웨이크락은 스캔이 실제로 뜬 뒤에만 잡는다 (BT 꺼짐 등으로 못 뜨면 잡을 이유가 없다).
         val btAdapter = (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter
         val scanner = btAdapter?.takeIf { it.isEnabled }?.bluetoothLeScanner ?: return
         val settings = ScanSettings.Builder()
@@ -529,39 +562,23 @@ class BleMonitorService : Service() {
             .build()
         try {
             scanner.startScan(null, settings, burstCallback)  // 무필터 = 수동 스캔과 동일
-            if (keepAwake) acquireBurstWakeLock(durationMs)
             burstScanning = true
             lastBurstAt = now
             burstSeenMacs.clear()
             burstAnchorHits = 0
+            burstDoorHits = 0
             MonitorLog.log(this, "버스트 스캔 시작 ($reason)")
             handler.removeCallbacks(stopBurstRunnable)
             handler.postDelayed(stopBurstRunnable, durationMs)
         } catch (e: Exception) {
             MonitorLog.log(this, "버스트 스캔 시작 실패: ${e.message}")
-            releaseBurstWakeLock()
         }
-    }
-
-    /** 주차 순간용 부분 웨이크락 — 타임아웃을 걸어 어떤 경로로 새도 배터리를 못 먹게 한다. */
-    private fun acquireBurstWakeLock(durationMs: Long) {
-        try {
-            val pm = getSystemService(POWER_SERVICE) as PowerManager
-            val wl = wakeLock ?: pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "parkingwidget:burst")
-                .also { it.setReferenceCounted(false); wakeLock = it }
-            wl.acquire(durationMs + 5_000L)
-        } catch (_: Exception) {}
-    }
-
-    private fun releaseBurstWakeLock() {
-        try { wakeLock?.takeIf { it.isHeld }?.release() } catch (_: Exception) {}
     }
 
     private val stopBurstRunnable = Runnable { stopBurstScan() }
 
     @SuppressLint("MissingPermission")
     private fun stopBurstScan() {
-        releaseBurstWakeLock()
         if (!burstScanning) return
         burstScanning = false
         try {
@@ -569,7 +586,7 @@ class BleMonitorService : Service() {
                 .adapter?.bluetoothLeScanner?.stopScan(burstCallback)
         } catch (_: Exception) {}
         // 기기 0종 = 스캔이 결과를 아예 못 받음(좀비/차단), 다수 종 + 앵커 0건 = 앵커 부재/변경
-        MonitorLog.log(this, "버스트 스캔 종료 (기기 ${burstSeenMacs.size}종, 앵커 ${burstAnchorHits}건)")
+        MonitorLog.log(this, "버스트 스캔 종료 (기기 ${burstSeenMacs.size}종, 앵커 ${burstAnchorHits}건, 도어비콘 ${burstDoorHits}건)")
     }
 
     override fun onCreate() {
@@ -725,7 +742,7 @@ class BleMonitorService : Service() {
         stopBleScan()
         stopBurstScan()
         handler.removeCallbacks(unconfirmedRunnable)
-        releaseBurstWakeLock()
+        handler.removeCallbacks(doorSummaryRunnable)
         try { unregisterReceiver(btStateReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(carReceiver) } catch (_: Exception) {}

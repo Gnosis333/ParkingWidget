@@ -23,9 +23,6 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Android 14+: Bluetooth foreground service 타입 선언 필요 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <!-- 주차 순간(차량 BT 해제) 집중 스캔 동안만 CPU를 붙잡아 둔다 — 화면 꺼짐 상태에서
-         결과 콜백을 받으려면 필요. 90초 타임아웃을 걸어 새더라도 배터리를 못 먹게 했다. -->
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
