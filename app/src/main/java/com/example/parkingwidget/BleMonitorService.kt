@@ -232,6 +232,7 @@ class BleMonitorService : Service() {
      */
     private fun maybeInferFloorFromDoor(now: Long) {
         if (!parkingPending || parkingGuessed) return                       // 주차 건에 한해 1회
+        if (ParkingState.isConfirmedForCurrentPark(this)) return             // 사용자가 이미 탭으로 정함
         if (now - parkedAt > PARKING_INFER_WINDOW_MS) return                // 주차 직후에만
         if (now - doorFirstSeenAt < DOOR_SUSTAIN_MS) return                 // 스쳐 지나간 건 제외
         if (lastF2AnchorAt != 0L && now - lastF2AnchorAt < DOOR_B2_QUIET_MS) return  // B2 침묵 확인
@@ -352,6 +353,18 @@ class BleMonitorService : Service() {
         }
 
         val basis = "B1:${f1Count}개/best=${f1Best ?: "-"} B2:${f2Count}개/best=${f2Best ?: "-"}"
+
+        // 이번 주차 건이 이미 확정됐으면 출차 전까지 고정한다 — 이후 신호는 걸어 나가는 사람의 위치다.
+        // (주차직후 확정이 램프 누설로 틀릴 위험은 낮다: 누설은 주차 87~104초 전이었고 근거 창은 15초)
+        // 미확인 중에 사용자가 위젯을 탭한 경우도 확정이므로, 늦게 잡힌 앵커가 그 선택을 덮지 않게
+        // 주차직후 경로보다 먼저 본다.
+        if (ParkingState.isConfirmedForCurrentPark(this)) {
+            parkingPending = false
+            challengerFloor = 0
+            if (candidate != lastFloor) logDecisionThrottled(now,
+                "주차 확정 유지 지하${lastFloor}층 — 후보 지하${candidate}층 무시, 출차 전까지 고정 ($basis)")
+            return
+        }
 
         // 주차 직후 첫 근거: 히스테리시스 없이 즉시 확정한다.
         // 직전 층은 "다른 주차 건"의 값이므로 지킬 이유가 없고(전환에 10초를 쓸 이유도 없다),

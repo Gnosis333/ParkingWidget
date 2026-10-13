@@ -61,6 +61,18 @@ object ParkingState {
     }
 
     /**
+     * 이번 주차 건의 층이 이미 확정됨(자동 판정 or 수동 탭). 출차 때 주차 시각이 지워지면 풀린다.
+     *
+     * 확정 뒤엔 차가 안 움직이니, 이후 바뀌는 신호는 사람이 걸어 나가며 다른 층을 지나는 것뿐이다
+     * (2026-10-13: B2 확정 71초 뒤 걸어서 B1으로 올라가자 B1 앵커에 덮여 '지하1층'으로 오판정).
+     * 판정 쪽은 이 상태면 층을 바꾸지 않는다. 프리퍼런스 기반이라 서비스가 재시작돼도 유지된다.
+     */
+    fun isConfirmedForCurrentPark(context: Context): Boolean {
+        val parked = parkedAt(context)
+        return parked > 0L && fixedAt(context) >= parked
+    }
+
+    /**
      * 화면에 뜬 층이 "이번 주차 건으로 확인된 값"이 아닌 상태.
      * 주차 이벤트 후 유예 시간이 지나도록 층 확정이 없었으면 true.
      */
