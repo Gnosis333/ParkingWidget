@@ -73,7 +73,7 @@
 |------|-----|
 | 주차 이벤트 직후에만 | 5분 이내 (`PARKING_INFER_WINDOW_MS`) |
 | 앵커 근거가 전혀 없을 것 | `recentAnchors` 비어 있음 |
-| 도어비콘 연속 수신 | 30초 이상 (`DOOR_SUSTAIN_MS`) |
+| 주차 후 도어비콘 수신 | 20건 이상 (`DOOR_MIN_HITS`), 첫~마지막 30초 이상 (`DOOR_MIN_SPAN_MS`) — 연속성은 안 봄 |
 | B2 앵커 침묵 | 120초 이상 (`DOOR_B2_QUIET_MS`) |
 | 주차 건당 | 1회만 |
 

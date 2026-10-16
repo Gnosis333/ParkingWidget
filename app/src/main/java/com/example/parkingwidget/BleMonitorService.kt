@@ -95,12 +95,15 @@ class BleMonitorService : Service() {
         // → "차고 문 앞인데 B2 앵커가 한참 조용하다"면 1층일 공산이 크다.
         // 오판정을 최소화하려고 범위를 좁게 건다:
         //  · 주차 직후(PARKING_INFER_WINDOW_MS)에만, 그것도 앵커 근거가 전혀 없을 때만
-        //  · 도어비콘을 DOOR_SUSTAIN_MS 이상 연속으로 듣고 있어야 하며
+        //  · 주차 후 도어비콘을 DOOR_MIN_HITS건 이상, 첫~마지막 수신이 DOOR_MIN_SPAN_MS 이상 벌어지게 들었고
         //  · B2 앵커가 DOOR_B2_QUIET_MS 동안 완전히 조용했어야 한다
         // 그리고 이 판정은 "확정"으로 치지 않는다 — 층 표시만 바꾸고 위젯의 미확인('?')은
         // 그대로 둬서, 앵커 없이 추론한 값임이 사용자에게 계속 보이게 한다.
-        private const val DOOR_SUSTAIN_MS = 30_000L         // 도어비콘 연속 수신 요구 시간
-        private const val DOOR_GAP_MS = 20_000L             // 이보다 끊기면 연속 수신이 깨진 것
+        // "30초 연속 수신"은 이 비콘의 송출 패턴에 안 맞았다(2026-10-16 B1: 5분간 220건을 들었는데
+        // 20초 넘는 끊김 때문에 최장 연속 24초 → 추론 불가). 연속성 대신 "충분히 여러 번, 충분히 오래"로 본다.
+        // 수신 빈도는 초당 ~1건(10-16 버스트 94초 110건) → 20건 ≈ 20초 분량, 스쳐 지나가는 정도로는 안 찬다.
+        private const val DOOR_MIN_HITS = 20                // 주차 후 도어비콘 최소 수신 건수
+        private const val DOOR_MIN_SPAN_MS = 30_000L        // 주차 후 첫~마지막 도어비콘 수신 간격
         private const val DOOR_B2_QUIET_MS = 120_000L       // B2 앵커가 이만큼 조용해야 인정
         private const val PARKING_INFER_WINDOW_MS = 5 * 60_000L  // 주차 후 이 시간 안에서만 추론
         /** onStartCommand로 전달되는 주차 이벤트 (서비스가 죽어 있었을 때 CarReceiver가 사용) */
@@ -159,15 +162,13 @@ class BleMonitorService : Service() {
     private var parkedAt = 0L               // 마지막 주차 이벤트(elapsedRealtime)
     private var parkingGuessed = false      // 이번 주차 건에 도어비콘 추론을 이미 적용했는지
 
-    // 도어비콘 연속 수신 추적 (끊기면 firstSeen을 다시 잡는다)
-    private var doorFirstSeenAt = 0L
-    private var doorLastSeenAt = 0L
     private var lastF2AnchorAt = 0L         // B2 앵커를 마지막으로 본 시각
 
-    // 주차 건별 도어비콘 진단: 추론이 안 걸렸을 때 "안 들렸나 vs 연속 수신 조건 미달인가"를
+    // 주차 건별 도어비콘 진단: 추론이 안 걸렸을 때 "안 들렸나 vs 건수·기간 조건 미달인가"를
     // 가르기 위한 기록 (2026-10-10/11 B1 미확인 2건은 이게 없어서 원인을 못 갈랐다).
     private var parkDoorHits = 0
-    private var parkDoorLongestMs = 0L
+    private var parkDoorFirstAt = 0L        // 주차 후 첫 도어비콘 수신 (0 = 아직 없음)
+    private var parkDoorLastAt = 0L
 
     private val handler = Handler(Looper.getMainLooper())
     private var scanning = false
@@ -199,18 +200,19 @@ class BleMonitorService : Service() {
 
     /**
      * 도어비콘 수신 — "차고 문 앞"이라는 것만 알려준다(1·2층 UUID 동일).
-     * 연속 수신 구간을 추적해두고, 앵커가 전혀 없는 주차 건에 한해 층 추론에 쓴다.
+     * 주차 후 수신 건수·기간을 추적해두고, 앵커가 전혀 없는 주차 건에 한해 층 추론에 쓴다.
      */
     private fun onDoorBeaconSeen() {
         val now = SystemClock.elapsedRealtime()
-        if (doorLastSeenAt == 0L || now - doorLastSeenAt > DOOR_GAP_MS) doorFirstSeenAt = now
-        doorLastSeenAt = now
-        if (parkingPending && now - parkedAt <= PARKING_INFER_WINDOW_MS) {
-            parkDoorHits++
-            parkDoorLongestMs = maxOf(parkDoorLongestMs, now - doorFirstSeenAt)
-        }
+        if (!parkingPending || now - parkedAt > PARKING_INFER_WINDOW_MS) return
+        parkDoorHits++
+        if (parkDoorFirstAt == 0L) parkDoorFirstAt = now
+        parkDoorLastAt = now
         maybeInferFloorFromDoor(now)
     }
+
+    private fun parkDoorSpanMs(): Long =
+        if (parkDoorFirstAt == 0L) 0L else parkDoorLastAt - parkDoorFirstAt
 
     /**
      * 추론 창이 끝났는데 앵커도 추론도 없었던 주차 건의 도어비콘 요약.
@@ -220,9 +222,13 @@ class BleMonitorService : Service() {
         if (!parkingPending || parkingGuessed) return@Runnable   // 앵커 확정 or 추론 완료 → 요약 불필요
         val now = SystemClock.elapsedRealtime()
         val b2 = if (lastF2AnchorAt == 0L) "기록 없음" else "${(now - lastF2AnchorAt) / 1000}초 무음"
+        // parkingPending인데 확정 상태 = 앵커 없이 사용자가 위젯을 탭한 경우 (앵커 확정이면 pending이 풀린다)
+        val tapped = if (ParkingState.isConfirmedForCurrentPark(this))
+            " (수동 탭으로 지하${ParkingState.floor(this)}층 확정됨)" else ""
         MonitorLog.log(this,
-            "도어비콘 추론 불가 — 주차 후 ${PARKING_INFER_WINDOW_MS / 60_000}분간 도어비콘 ${parkDoorHits}건, " +
-                "최장 연속 ${parkDoorLongestMs / 1000}초(요구 ${DOOR_SUSTAIN_MS / 1000}초), B2 앵커 $b2")
+            "도어비콘 추론 불가 — 주차 후 ${PARKING_INFER_WINDOW_MS / 60_000}분간 도어비콘 ${parkDoorHits}건" +
+                "(요구 ${DOOR_MIN_HITS}건), 첫~마지막 ${parkDoorSpanMs() / 1000}초(요구 ${DOOR_MIN_SPAN_MS / 1000}초), " +
+                "B2 앵커 $b2$tapped")
     }
 
     /**
@@ -234,14 +240,15 @@ class BleMonitorService : Service() {
         if (!parkingPending || parkingGuessed) return                       // 주차 건에 한해 1회
         if (ParkingState.isConfirmedForCurrentPark(this)) return             // 사용자가 이미 탭으로 정함
         if (now - parkedAt > PARKING_INFER_WINDOW_MS) return                // 주차 직후에만
-        if (now - doorFirstSeenAt < DOOR_SUSTAIN_MS) return                 // 스쳐 지나간 건 제외
+        if (parkDoorHits < DOOR_MIN_HITS) return                            // 스쳐 지나간 건 제외
+        if (parkDoorSpanMs() < DOOR_MIN_SPAN_MS) return
         if (lastF2AnchorAt != 0L && now - lastF2AnchorAt < DOOR_B2_QUIET_MS) return  // B2 침묵 확인
         recentAnchors.entries.removeAll { now - it.value.second > ANCHOR_FRESH_MS }
         if (recentAnchors.isNotEmpty()) return                              // 앵커 근거가 있으면 그쪽이 우선
 
         parkingGuessed = true
         MonitorLog.log(this,
-            "도어비콘 추론 → 지하 1층 (앵커 0건, 도어비콘 ${(now - doorFirstSeenAt) / 1000}초 연속, " +
+            "도어비콘 추론 → 지하 1층 (앵커 0건, 도어비콘 ${parkDoorHits}건/${parkDoorSpanMs() / 1000}초, " +
                 "B2 앵커 ${if (lastF2AnchorAt == 0L) "기록 없음" else "${(now - lastF2AnchorAt) / 1000}초 무음"}) — 미확인 유지")
         ParkingState.setGuess(this, 1)   // 확정 시각은 남기지 않는다 → 위젯은 '1F?'
         ParkingWidgetProvider.refreshAll(this)
@@ -471,7 +478,8 @@ class BleMonitorService : Service() {
         parkingGuessed = false
         parkedAt = SystemClock.elapsedRealtime()
         parkDoorHits = 0
-        parkDoorLongestMs = 0L
+        parkDoorFirstAt = 0L
+        parkDoorLastAt = 0L
         challengerFloor = 0
         // 직전 15초 근거는 "차를 세운 그 자리"의 증거라 살려둔다 (통째로 비우면 방금 받은
         // 수신을 버리게 된다). 그보다 오래된 것만 램프에서 스친 흔적으로 보고 버린다.
