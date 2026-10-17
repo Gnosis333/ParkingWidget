@@ -549,7 +549,12 @@ class BleMonitorService : Service() {
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == Intent.ACTION_SCREEN_ON) startBurstScan("화면 켜짐")
+            if (intent.action != Intent.ACTION_SCREEN_ON) return
+            // 위젯은 주기 갱신이 없어(updatePeriodMillis=0) 우리가 다시 그릴 때만 바뀐다.
+            // 미확인 판정은 시간 기준인데 그 타이머(Handler)는 Doze에서 멈춰 늦게 돈다
+            // (2026-10-17: 3분 타이머가 9분 반 뒤 발화) → 사용자가 보는 순간 최신 상태로 다시 그린다.
+            ParkingWidgetProvider.refreshAll(this@BleMonitorService)
+            startBurstScan("화면 켜짐")
         }
     }
 

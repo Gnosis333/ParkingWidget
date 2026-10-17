@@ -19,6 +19,7 @@ object ParkingState {
     private const val KEY_FLOOR = "SelectedFloor"
     private const val KEY_PARKED_AT = "ParkedAt"      // 마지막 주차 이벤트(차량 BT 해제) 시각
     private const val KEY_FIXED_AT = "FloorFixedAt"   // 마지막 층 확정 시각 (자동 판정 or 수동 탭)
+    private const val KEY_GUESSED_AT = "FloorGuessedAt" // 마지막 추정 표시 시각 (도어비콘 역추론)
 
     /**
      * 주차 직후 이만큼은 아직 "확인 중"으로 보고 기존 값을 그대로 보여준다.
@@ -45,9 +46,10 @@ object ParkingState {
      *
      * 도어비콘 역추론처럼 앵커 없이 얻은 값에 쓴다. 표시되는 층만 바뀌고 "이번 주차 건
      * 미확인" 상태는 그대로라, 위젯은 계속 물음표를 달고 나온다(= 참고용 추정임을 드러냄).
+     * 추정 시각을 남겨, 유예 시간 안에 뜬 추정도 곧바로 물음표가 붙게 한다(isUnconfirmed 참고).
      */
-    fun setGuess(context: Context, floor: Int) {
-        prefs(context).edit().putInt(KEY_FLOOR, floor).apply()
+    fun setGuess(context: Context, floor: Int, at: Long = System.currentTimeMillis()) {
+        prefs(context).edit().putInt(KEY_FLOOR, floor).putLong(KEY_GUESSED_AT, at).apply()
     }
 
     /** 주차 이벤트(차량 BT 해제) 기록 — 이 시각 이후의 확정만 "이번 주차 건"으로 인정된다. */
@@ -75,9 +77,16 @@ object ParkingState {
     /**
      * 화면에 뜬 층이 "이번 주차 건으로 확인된 값"이 아닌 상태.
      * 주차 이벤트 후 유예 시간이 지나도록 층 확정이 없었으면 true.
+     *
+     * 이번 주차 건에 추정 값이 이미 떠 있으면 유예를 기다리지 않는다. 유예는 "기존 값을 잠깐
+     * 더 보여줘도 되는 시간"인데, 추정은 기존 값이 아니라 새로 띄운 불확실한 값이기 때문이다.
+     * (2026-10-17: 주차 64초 뒤 도어비콘 추정 1F가 떴는데, 유예 3분짜리 타이머가 Doze로
+     *  9분 반 뒤에야 돌아서 그동안 물음표 없는 1F — 확정처럼 보이는 값 — 이 표시됐다)
      */
     fun isUnconfirmed(context: Context, now: Long = System.currentTimeMillis()): Boolean {
         val parked = parkedAt(context)
-        return parked > 0L && fixedAt(context) < parked && now - parked > UNCONFIRMED_GRACE_MS
+        if (parked <= 0L || fixedAt(context) >= parked) return false
+        val guessed = prefs(context).getLong(KEY_GUESSED_AT, 0L) >= parked
+        return guessed || now - parked > UNCONFIRMED_GRACE_MS
     }
 }
