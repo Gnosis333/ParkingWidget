@@ -95,15 +95,19 @@ class BleMonitorService : Service() {
         // → "차고 문 앞인데 B2 앵커가 한참 조용하다"면 1층일 공산이 크다.
         // 오판정을 최소화하려고 범위를 좁게 건다:
         //  · 주차 직후(PARKING_INFER_WINDOW_MS)에만, 그것도 앵커 근거가 전혀 없을 때만
-        //  · 주차 후 도어비콘을 DOOR_MIN_HITS건 이상, 첫~마지막 수신이 DOOR_MIN_SPAN_MS 이상 벌어지게 들었고
+        //  · 주차 후 도어비콘을 DOOR_MIN_HITS건 이상 들었고
+        //  · 주차 후 DOOR_MIN_PARKED_MS가 지나도록 B2 앵커가 한 번도 안 잡혔으며
         //  · B2 앵커가 DOOR_B2_QUIET_MS 동안 완전히 조용했어야 한다
         // 그리고 이 판정은 "확정"으로 치지 않는다 — 층 표시만 바꾸고 위젯의 미확인('?')은
         // 그대로 둬서, 앵커 없이 추론한 값임이 사용자에게 계속 보이게 한다.
-        // "30초 연속 수신"은 이 비콘의 송출 패턴에 안 맞았다(2026-10-16 B1: 5분간 220건을 들었는데
-        // 20초 넘는 끊김 때문에 최장 연속 24초 → 추론 불가). 연속성 대신 "충분히 여러 번, 충분히 오래"로 본다.
-        // 수신 빈도는 초당 ~1건(10-16 버스트 94초 110건) → 20건 ≈ 20초 분량, 스쳐 지나가는 정도로는 안 찬다.
-        private const val DOOR_MIN_HITS = 20                // 주차 후 도어비콘 최소 수신 건수
-        private const val DOOR_MIN_SPAN_MS = 30_000L        // 주차 후 첫~마지막 도어비콘 수신 간격
+        // 도어비콘의 "머문 시간"은 층을 못 가른다 (2026-10-23 집계):
+        //  · B1 주차의 첫~마지막 수신 간격은 문 앞을 얼마나 머무르냐에 따라 7~36초로 들쭉날쭉했고
+        //    (10-17 36초, 10-18 30초, 10-22 7초, 10-23 8초) 30초 문턱이 B1 추론만 막았다.
+        //  · B2 주차에서도 도어비콘은 걸어 나갈 때 많이·길게 들린다(10-19 73건, 10-20 88건).
+        // 층을 가르는 건 "B2 앵커가 들렸나"다 — 09-29 이후 B2 주차 12건은 전부 앵커로 확정됐고,
+        // 주차 후 확정까지 3~23초 걸렸다. 그래서 기간 조건을 버리고 "주차 후 60초간 B2 무수신"을 건다.
+        private const val DOOR_MIN_HITS = 20                // 주차 후 도어비콘 최소 수신 건수 (차고 안이라는 증거)
+        private const val DOOR_MIN_PARKED_MS = 60_000L      // 주차 후 이만큼 지나도록 B2 앵커가 없어야 한다 (관측 최대 23초)
         private const val DOOR_B2_QUIET_MS = 120_000L       // B2 앵커가 이만큼 조용해야 인정
         private const val PARKING_INFER_WINDOW_MS = 5 * 60_000L  // 주차 후 이 시간 안에서만 추론
         /** onStartCommand로 전달되는 주차 이벤트 (서비스가 죽어 있었을 때 CarReceiver가 사용) */
@@ -215,6 +219,13 @@ class BleMonitorService : Service() {
         if (parkDoorFirstAt == 0L) 0L else parkDoorLastAt - parkDoorFirstAt
 
     /**
+     * 주차 후 DOOR_MIN_PARKED_MS 시점의 재확인.
+     * 추론은 도어비콘 수신 때마다 평가되는데, 비콘이 그보다 일찍 끊기면(문을 빨리 지나가면)
+     * 조건이 갖춰지는 순간 평가할 계기가 없다(10-23: 41건이 8초 안에 몰림).
+     */
+    private val doorCheckRunnable = Runnable { maybeInferFloorFromDoor(SystemClock.elapsedRealtime()) }
+
+    /**
      * 추론 창이 끝났는데 앵커도 추론도 없었던 주차 건의 도어비콘 요약.
      * 어느 조건에서 막혔는지 남겨, 다음 미확인 때 문턱 조정 여부를 판단할 수 있게 한다.
      */
@@ -227,7 +238,8 @@ class BleMonitorService : Service() {
             " (수동 탭으로 지하${ParkingState.floor(this)}층 확정됨)" else ""
         MonitorLog.log(this,
             "도어비콘 추론 불가 — 주차 후 ${PARKING_INFER_WINDOW_MS / 60_000}분간 도어비콘 ${parkDoorHits}건" +
-                "(요구 ${DOOR_MIN_HITS}건), 첫~마지막 ${parkDoorSpanMs() / 1000}초(요구 ${DOOR_MIN_SPAN_MS / 1000}초), " +
+                "(요구 ${DOOR_MIN_HITS}건), 첫~마지막 ${parkDoorSpanMs() / 1000}초, " +
+                (if (lastF2AnchorAt >= parkedAt) "주차 후 B2 앵커 수신됨, " else "") +
                 "B2 앵커 $b2$tapped")
     }
 
@@ -240,8 +252,9 @@ class BleMonitorService : Service() {
         if (!parkingPending || parkingGuessed) return                       // 주차 건에 한해 1회
         if (ParkingState.isConfirmedForCurrentPark(this)) return             // 사용자가 이미 탭으로 정함
         if (now - parkedAt > PARKING_INFER_WINDOW_MS) return                // 주차 직후에만
-        if (parkDoorHits < DOOR_MIN_HITS) return                            // 스쳐 지나간 건 제외
-        if (parkDoorSpanMs() < DOOR_MIN_SPAN_MS) return
+        if (parkDoorHits < DOOR_MIN_HITS) return                            // 차고 안이라는 증거 부족
+        if (now - parkedAt < DOOR_MIN_PARKED_MS) return                     // B2 앵커가 잡힐 시간을 준다
+        if (lastF2AnchorAt >= parkedAt) return                              // 주차 후 B2 앵커가 한 번이라도 들림
         if (lastF2AnchorAt != 0L && now - lastF2AnchorAt < DOOR_B2_QUIET_MS) return  // B2 침묵 확인
         recentAnchors.entries.removeAll { now - it.value.second > ANCHOR_FRESH_MS }
         if (recentAnchors.isNotEmpty()) return                              // 앵커 근거가 있으면 그쪽이 우선
@@ -465,6 +478,7 @@ class BleMonitorService : Service() {
             parkingGuessed = false
             handler.removeCallbacks(unconfirmedRunnable)
             handler.removeCallbacks(doorSummaryRunnable)
+            handler.removeCallbacks(doorCheckRunnable)
             ParkingState.clearParked(this)
             ParkingWidgetProvider.refreshAll(this)
             return
@@ -494,6 +508,8 @@ class BleMonitorService : Service() {
         // 유예 시간이 지나도 확정이 없으면 위젯을 "미확인"으로 다시 그린다.
         handler.removeCallbacks(unconfirmedRunnable)
         handler.postDelayed(unconfirmedRunnable, ParkingState.UNCONFIRMED_GRACE_MS + 1_000L)
+        handler.removeCallbacks(doorCheckRunnable)
+        handler.postDelayed(doorCheckRunnable, DOOR_MIN_PARKED_MS + 1_000L)
         handler.removeCallbacks(doorSummaryRunnable)
         handler.postDelayed(doorSummaryRunnable, PARKING_INFER_WINDOW_MS + 1_000L)
     }
@@ -505,6 +521,7 @@ class BleMonitorService : Service() {
         parkingGuessed = false
         handler.removeCallbacks(unconfirmedRunnable)
         handler.removeCallbacks(doorSummaryRunnable)
+        handler.removeCallbacks(doorCheckRunnable)
         ParkingState.clearParked(this)
         ParkingWidgetProvider.refreshAll(this)
     }
@@ -553,6 +570,8 @@ class BleMonitorService : Service() {
             // 위젯은 주기 갱신이 없어(updatePeriodMillis=0) 우리가 다시 그릴 때만 바뀐다.
             // 미확인 판정은 시간 기준인데 그 타이머(Handler)는 Doze에서 멈춰 늦게 돈다
             // (2026-10-17: 3분 타이머가 9분 반 뒤 발화) → 사용자가 보는 순간 최신 상태로 다시 그린다.
+            // 60초 재확인 타이머도 같은 이유로 늦을 수 있어, 보는 순간 도어비콘 추론도 한 번 더 평가한다.
+            maybeInferFloorFromDoor(SystemClock.elapsedRealtime())
             ParkingWidgetProvider.refreshAll(this@BleMonitorService)
             startBurstScan("화면 켜짐")
         }
@@ -769,6 +788,7 @@ class BleMonitorService : Service() {
         stopBurstScan()
         handler.removeCallbacks(unconfirmedRunnable)
         handler.removeCallbacks(doorSummaryRunnable)
+        handler.removeCallbacks(doorCheckRunnable)
         try { unregisterReceiver(btStateReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(carReceiver) } catch (_: Exception) {}
