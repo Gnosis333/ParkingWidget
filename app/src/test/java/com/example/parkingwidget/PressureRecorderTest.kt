@@ -1,0 +1,45 @@
+package com.example.parkingwidget
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class PressureRecorderTest {
+
+    private val parkAt = 1_000_000L
+
+    /** 1Hz 샘플 생성: secBefore초 전 시각의 기압을 pressureAt(secBefore)로 */
+    private fun samples(fromSecBefore: Int, pressureAt: (Int) -> Float) =
+        (fromSecBefore downTo 0).map { sec -> (parkAt - sec * 1000L) to pressureAt(sec) }
+
+    @Test
+    fun descentShowsAsPositiveDelta() {
+        // 150초 전까지 거리(1000.00), 그 뒤 60초에 걸쳐 0.40 상승한 뒤 주차
+        val s = samples(200) { sec ->
+            when {
+                sec >= 90 -> 1000.00f
+                sec <= 30 -> 1000.40f
+                else -> 1000.00f + 0.40f * (90 - sec) / 60f
+            }
+        }
+        val line = PressureRecorder.summarize(s, parkAt)
+        assertTrue(line, line.contains("주차 1000.40hPa"))
+        assertTrue(line, line.contains("Δ+0.40 hPa"))
+        assertTrue(line, line.contains("120초 전 대비 +0.40"))
+    }
+
+    @Test
+    fun ignoresSamplesAfterParkAndOutsideLookback() {
+        val s = samples(400) { 1000.00f } + listOf((parkAt + 5_000L) to 1010f)
+        val line = PressureRecorder.summarize(s, parkAt)
+        assertTrue(line, line.contains("Δ+0.00 hPa"))
+        assertTrue(line, line.contains("샘플 180개"))
+    }
+
+    @Test
+    fun reportsMissingSamples() {
+        assertEquals("기압 기록 — 샘플 없음 (운행 중 기록 안 됨)", PressureRecorder.summarize(emptyList(), parkAt))
+        val old = samples(100) { 1000f }.filter { parkAt - it.first > 20_000 }
+        assertTrue(PressureRecorder.summarize(old, parkAt).contains("주차 직전 15초 샘플 없음"))
+    }
+}

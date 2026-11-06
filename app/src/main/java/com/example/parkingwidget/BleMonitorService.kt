@@ -175,6 +175,8 @@ class BleMonitorService : Service() {
     private var parkDoorLastAt = 0L
 
     private val handler = Handler(Looper.getMainLooper())
+    // 주차 순간 기압 상승폭 기록 (1단계: 로그만). 운행 중에만 센서를 켠다.
+    private val pressure by lazy { PressureRecorder(this, handler) }
     private var scanning = false
     private var lastScanStartAt = 0L                    // 직전 필터 스캔 시작 시각(중복 재시작 억제)
     @Volatile private var lastAnchorSeen = 0L           // 마지막으로 앵커를 본 시각(elapsedRealtime)
@@ -469,6 +471,7 @@ class BleMonitorService : Service() {
 
     /** 주차 완료 순간: 이번 주차 건을 "미확정"으로 초기화하고 집중 스캔을 건다. */
     private fun onParked(label: String) {
+        val parkAt = SystemClock.elapsedRealtime()
         // 집 차고 밖이면 층 자체가 의미 없다 → 집중 스캔도 미확인 경고도 생략.
         // (위치를 모르면 null이 와서 아래 기존 경로로 간다 — 경고를 잃지 않는 쪽으로 fail-open)
         HomeLocation.awayDistanceOrNull(this)?.let { away ->
@@ -479,6 +482,7 @@ class BleMonitorService : Service() {
             handler.removeCallbacks(unconfirmedRunnable)
             handler.removeCallbacks(doorSummaryRunnable)
             handler.removeCallbacks(doorCheckRunnable)
+            pressure.stop()
             ParkingState.clearParked(this)
             ParkingWidgetProvider.refreshAll(this)
             return
@@ -487,6 +491,7 @@ class BleMonitorService : Service() {
         MonitorLog.log(this, "주차 감지 (차량 BT 해제: $label) → " +
             if (screenOn) "집중 스캔 ${PARKING_BURST_MS / 1000}초" else "화면 꺼짐 — 필터 스캔만 (무필터 버스트 생략)")
         ParkingState.markParked(this)
+        pressure.finishAt(parkAt) { MonitorLog.log(this, it) }
         // 직전 층은 다른 주차 건의 값이다. 근거를 비우고 첫 수신에 즉시 확정하도록 전환.
         parkingPending = true
         parkingGuessed = false
@@ -517,6 +522,7 @@ class BleMonitorService : Service() {
     /** 출차: 운행 중엔 층 값이 의미 없으므로 미확인 표시를 내린다. */
     private fun onDriveStarted(label: String) {
         MonitorLog.log(this, "출차 감지 (차량 BT 연결: $label)")
+        pressure.start()
         parkingPending = false
         parkingGuessed = false
         handler.removeCallbacks(unconfirmedRunnable)
@@ -789,6 +795,7 @@ class BleMonitorService : Service() {
         handler.removeCallbacks(unconfirmedRunnable)
         handler.removeCallbacks(doorSummaryRunnable)
         handler.removeCallbacks(doorCheckRunnable)
+        pressure.stop()
         try { unregisterReceiver(btStateReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(carReceiver) } catch (_: Exception) {}
