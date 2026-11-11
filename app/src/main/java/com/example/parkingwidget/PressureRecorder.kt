@@ -25,8 +25,15 @@ class PressureRecorder(context: Context, private val handler: Handler) : SensorE
     companion object {
         private const val SAMPLING_US = 1_000_000          // 1Hz면 충분 (층 변화는 수십 초 단위)
         private const val MAX_LATENCY_US = 60_000_000      // 잠든 동안은 FIFO에 모아둔다
-        private const val KEEP_MS = 6 * 60_000L            // 버퍼 보관 범위
+        private const val KEEP_MS = 10 * 60_000L           // 버퍼 보관 범위 (주차 후 대기가 Doze로 늘어져도 주차 전 3분을 지킨다)
         private const val FLUSH_TIMEOUT_MS = 3_000L        // flush 완료 콜백이 안 오면 이만큼 뒤 그냥 계산
+
+        // 시동을 끈 뒤(= 송풍 정지) 기압이 얼마나 꺾이는지도 본다.
+        // 배경(2026-11-10): 11-09 B2는 Δ+0.57로 다른 B2(+0.92, +0.99)보다 작았고, 그날만 김 서림 방지를 켰다.
+        // 송풍·외기로 차 실내가 가압되면 주행 중 기준점이 높게 찍혀 Δ가 줄어든다는 가설을 재기 위한 값이다.
+        // 처음 5초는 문 여닫이 등 과도 구간이라 빼고 5~20초 평균을 쓴다.
+        private const val POST_SKIP_MS = 5_000L
+        private const val POST_PARK_MS = 20_000L
 
         private const val BIN_MS = 5_000L                  // 노이즈 완화용 5초 평균 구간
         private const val LOOKBACK_MS = 180_000L           // "거리 높이"를 찾는 범위 (램프 진입 전)
@@ -51,9 +58,13 @@ class PressureRecorder(context: Context, private val handler: Handler) : SensorE
             fun lag(sec: Int) = bins[(sec * 1000 / BIN_MS).toInt()]?.let { fmt(pPark - it) } ?: "-"
 
             val n = samples.count { it.first <= parkAt && parkAt - it.first < LOOKBACK_MS }
-            return "기압 기록 — 주차 %.2fhPa, 3분내 최저 %.2f(%d초 전) → Δ%s hPa (60초 전 대비 %s, 120초 전 대비 %s), 샘플 %d개"
+            val post = samples.filter { it.first - parkAt in (POST_SKIP_MS + 1)..POST_PARK_MS }
+            val postPart = if (post.isEmpty()) "시동 끈 뒤 샘플 없음"
+                else "시동 끈 뒤 5~20초 %s(%d개)".format(Locale.US,
+                    fmt(post.map { it.second.toDouble() }.average() - pPark), post.size)
+            return "기압 기록 — 주차 %.2fhPa, 3분내 최저 %.2f(%d초 전) → Δ%s hPa (60초 전 대비 %s, 120초 전 대비 %s), %s, 샘플 %d개"
                 .format(Locale.US, pPark, minEntry.value, minEntry.key * BIN_MS / 1000,
-                    fmt(pPark - minEntry.value), lag(60), lag(120), n)
+                    fmt(pPark - minEntry.value), lag(60), lag(120), postPart, n)
         }
 
         private fun fmt(d: Double) = String.format(Locale.US, "%+.2f", d)
@@ -79,24 +90,34 @@ class PressureRecorder(context: Context, private val handler: Handler) : SensorE
         if (active) sm?.unregisterListener(this)
         active = false
         pending = null
+        handler.removeCallbacks(postParkRunnable)
         handler.removeCallbacks(timeoutRunnable)
     }
 
     /**
-     * 주차 순간 호출. FIFO를 비워 잠든 동안의 샘플까지 받은 뒤 요약을 넘기고 기록을 멈춘다.
-     * 운행 중 기록이 없었으면(서비스가 주차 때 새로 떴다든가) 그 사실을 넘긴다.
+     * 주차 순간 호출. 시동 끈 뒤 POST_PARK_MS를 더 기록하고, FIFO를 비워 잠든 동안의 샘플까지 받은 뒤
+     * 요약을 넘기고 기록을 멈춘다. 운행 중 기록이 없었으면(서비스가 주차 때 새로 떴다든가) 그 사실을 넘긴다.
+     *
+     * FIFO는 몇 분치뿐이라(실측 수신 속도 1.6~2Hz) 주차 전 3분이 밀려나지 않게 주차 순간 한 번 비워 두고,
+     * 20초 뒤 다시 비워 주차 후 샘플을 받는다. 첫 flush 완료 콜백은 pending이 없어 아무 일도 안 한다.
      */
     fun finishAt(parkAt: Long, onSummary: (String) -> Unit) {
         if (!active) { onSummary(summarize(emptyList(), parkAt)); return }
-        pending = {
-            val line = summarize(samples.toList(), parkAt)
-            stop()
-            onSummary(line)
+        sm?.flush(this)
+        handler.removeCallbacks(postParkRunnable)
+        postParkRunnable = Runnable {
+            pending = {
+                val line = summarize(samples.toList(), parkAt)
+                stop()
+                onSummary(line)
+            }
+            if (sm?.flush(this) != true) complete()
+            else handler.postDelayed(timeoutRunnable, FLUSH_TIMEOUT_MS)
         }
-        if (sm?.flush(this) != true) complete()
-        else handler.postDelayed(timeoutRunnable, FLUSH_TIMEOUT_MS)
+        handler.postDelayed(postParkRunnable, POST_PARK_MS)
     }
 
+    private var postParkRunnable = Runnable {}
     private val timeoutRunnable = Runnable { complete() }
 
     private fun complete() {

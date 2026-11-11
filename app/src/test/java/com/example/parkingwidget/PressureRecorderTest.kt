@@ -37,6 +37,16 @@ class PressureRecorderTest {
     }
 
     @Test
+    fun reportsStepAfterEngineOff() {
+        // 주차까지 1000.50(송풍으로 가압), 시동 끈 뒤 3초는 과도 구간, 5~20초는 1000.38
+        val before = samples(200) { 1000.50f }
+        val after = (1..20).map { sec -> (parkAt + sec * 1000L) to (if (sec <= 3) 1000.45f else 1000.38f) }
+        val line = PressureRecorder.summarize(before + after, parkAt)
+        assertTrue(line, line.contains("시동 끈 뒤 5~20초 -0.12(15개)"))
+        assertTrue(line, line.contains("Δ+0.00 hPa"))   // 주차 후 샘플은 Δ 계산에 안 섞인다
+    }
+
+    @Test
     fun reportsMissingSamples() {
         assertEquals("기압 기록 — 샘플 없음 (운행 중 기록 안 됨)", PressureRecorder.summarize(emptyList(), parkAt))
         val old = samples(100) { 1000f }.filter { parkAt - it.first > 20_000 }
