@@ -35,6 +35,18 @@ class PressureRecorder(context: Context, private val handler: Handler) : SensorE
         private const val POST_SKIP_MS = 5_000L
         private const val POST_PARK_MS = 20_000L
 
+        /**
+         * 층 예측 기준 (2026-11-17 사전 등록, 판정에는 쓰지 않고 로그에만 남긴다).
+         * 앵커 확정·사용자 확인으로 층이 알려진 9건의 Δ: B1 0.00/0.40/0.41, B2 0.57/0.58/0.77/0.92/0.95/0.99.
+         * 두 무리 사이(0.41 ↔ 0.57)의 가운데로 잡았다. 양쪽 여유가 0.08뿐이라 아직 판정에 쓸 수준이 아니다.
+         * 이 값은 앞으로 쌓이는 기록을 보고 고치지 않고 "예측이 몇 건 맞았나"를 먼저 센다 — 사후에 기준을 옮겨
+         * 맞춰 보는 걸 막으려는 것이다. 바꿀 때는 로그에 남는 기준값과 함께 바꾼 날짜를 노트에 적는다.
+         */
+        const val B2_MIN_DELTA_HPA = 0.5
+
+        /** Δ로 층을 예측해 "B1"/"B2". */
+        fun predictFloor(delta: Double) = if (delta >= B2_MIN_DELTA_HPA) "B2" else "B1"
+
         private const val BIN_MS = 5_000L                  // 노이즈 완화용 5초 평균 구간
         private const val LOOKBACK_MS = 180_000L           // "거리 높이"를 찾는 범위 (램프 진입 전)
 
@@ -58,13 +70,15 @@ class PressureRecorder(context: Context, private val handler: Handler) : SensorE
             fun lag(sec: Int) = bins[(sec * 1000 / BIN_MS).toInt()]?.let { fmt(pPark - it) } ?: "-"
 
             val n = samples.count { it.first <= parkAt && parkAt - it.first < LOOKBACK_MS }
+            val delta = pPark - minEntry.value
             val post = samples.filter { it.first - parkAt in (POST_SKIP_MS + 1)..POST_PARK_MS }
             val postPart = if (post.isEmpty()) "시동 끈 뒤 샘플 없음"
                 else "시동 끈 뒤 5~20초 %s(%d개)".format(Locale.US,
                     fmt(post.map { it.second.toDouble() }.average() - pPark), post.size)
-            return "기압 기록 — 주차 %.2fhPa, 3분내 최저 %.2f(%d초 전) → Δ%s hPa (60초 전 대비 %s, 120초 전 대비 %s), %s, 샘플 %d개"
+            return ("기압 기록 — 주차 %.2fhPa, 3분내 최저 %.2f(%d초 전) → Δ%s hPa (60초 전 대비 %s, 120초 전 대비 %s), %s, 샘플 %d개" +
+                " → 기압 예측 %s (기준 Δ%.1f, 판정엔 미사용)")
                 .format(Locale.US, pPark, minEntry.value, minEntry.key * BIN_MS / 1000,
-                    fmt(pPark - minEntry.value), lag(60), lag(120), postPart, n)
+                    fmt(delta), lag(60), lag(120), postPart, n, predictFloor(delta), B2_MIN_DELTA_HPA)
         }
 
         private fun fmt(d: Double) = String.format(Locale.US, "%+.2f", d)

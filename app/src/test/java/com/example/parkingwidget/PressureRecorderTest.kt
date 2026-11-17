@@ -47,6 +47,16 @@ class PressureRecorderTest {
     }
 
     @Test
+    fun predictsFloorFromDelta() {
+        assertEquals("B1", PressureRecorder.predictFloor(0.00))
+        assertEquals("B1", PressureRecorder.predictFloor(0.41))   // 지금까지 B1 최대
+        assertEquals("B2", PressureRecorder.predictFloor(0.57))   // 지금까지 B2 최소
+        assertEquals("B2", PressureRecorder.predictFloor(0.50))   // 기준값은 B2 쪽
+        val s = samples(200) { sec -> if (sec >= 90) 1000.00f else 1000.60f }
+        assertTrue(PressureRecorder.summarize(s, parkAt).contains("기압 예측 B2 (기준 Δ0.5, 판정엔 미사용)"))
+    }
+
+    @Test
     fun reportsMissingSamples() {
         assertEquals("기압 기록 — 샘플 없음 (운행 중 기록 안 됨)", PressureRecorder.summarize(emptyList(), parkAt))
         val old = samples(100) { 1000f }.filter { parkAt - it.first > 20_000 }
