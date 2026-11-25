@@ -57,6 +57,29 @@ class PressureRecorderTest {
     }
 
     @Test
+    fun predictsFloorFromMinAge() {
+        assertEquals("B1", PressureRecorder.predictFloorByMinAge(0))
+        assertEquals("B1", PressureRecorder.predictFloorByMinAge(70))    // 사전 등록 때 B1 최대
+        assertEquals("B1", PressureRecorder.predictFloorByMinAge(75))
+        assertEquals("B2", PressureRecorder.predictFloorByMinAge(80))    // 기준값은 B2 쪽
+        assertEquals("B2", PressureRecorder.predictFloorByMinAge(90))    // 사전 등록 때 B2 최소
+        assertEquals("B2", PressureRecorder.predictFloorByMinAge(120))
+    }
+
+    @Test
+    fun logsMinAgePredictionFromBottomTime() {
+        // 최저점(1000.00)이 주차 60~64초 전에만 있으면 B1 쪽, 100~104초 전이면 B2 쪽
+        fun lineWithBottomAt(sec0: Int) = PressureRecorder.summarize(
+            samples(200) { sec -> if (sec in sec0..sec0 + 4) 1000.00f else 1000.40f }, parkAt)
+        val b1 = lineWithBottomAt(60)
+        assertTrue(b1, b1.contains("3분내 최저 1000.00(60초 전)"))
+        assertTrue(b1, b1.contains("최저시점 예측 B1 (기준 80초, 판정엔 미사용)"))
+        val b2 = lineWithBottomAt(100)
+        assertTrue(b2, b2.contains("3분내 최저 1000.00(100초 전)"))
+        assertTrue(b2, b2.contains("최저시점 예측 B2 (기준 80초, 판정엔 미사용)"))
+    }
+
+    @Test
     fun reportsMissingSamples() {
         assertEquals("기압 기록 — 샘플 없음 (운행 중 기록 안 됨)", PressureRecorder.summarize(emptyList(), parkAt))
         val old = samples(100) { 1000f }.filter { parkAt - it.first > 20_000 }

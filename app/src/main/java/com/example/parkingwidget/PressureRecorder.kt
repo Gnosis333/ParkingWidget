@@ -47,6 +47,18 @@ class PressureRecorder(context: Context, private val handler: Handler) : SensorE
         /** Δ로 층을 예측해 "B1"/"B2". */
         fun predictFloor(delta: Double) = if (delta >= B2_MIN_DELTA_HPA) "B2" else "B1"
 
+        /**
+         * 두 번째 층 예측: 3분 안 최저 기압이 주차 몇 초 전이었나 (2026-11-20 사전 등록, 판정에는 쓰지 않는다).
+         * 최저 지점 = 언덕 꼭대기 입구로 보고, 거기서 주차 자리까지 걸린 시간이 B2(더 깊고 멂)에서 더 길 것이라는 가설.
+         * 이미 쌓인 12건에서 B1은 0~70초 전, B2는 90~120초 전이라 80초 근처에서 갈렸지만, 이건 본 데이터에서 고른 지표라
+         * 근거가 아니라 가설이다. 그래서 기준을 12건의 틈(70↔90)의 가운데인 80초로 지금 고정하고, 11-20 이후 주차부터만
+         * 따로 센다(앞 12건과 11-20 건은 기준을 고르는 데 쓴 것이라 성적에서 제외). 기록을 보고 이 값을 옮기지 않는다.
+         */
+        const val B2_MIN_MIN_AGE_SEC = 80
+
+        /** 최저 시점(초 전)으로 층을 예측해 "B1"/"B2". 80초 이상 전이면 B2. */
+        fun predictFloorByMinAge(minAgeSec: Int) = if (minAgeSec >= B2_MIN_MIN_AGE_SEC) "B2" else "B1"
+
         private const val BIN_MS = 5_000L                  // 노이즈 완화용 5초 평균 구간
         private const val LOOKBACK_MS = 180_000L           // "거리 높이"를 찾는 범위 (램프 진입 전)
 
@@ -75,10 +87,13 @@ class PressureRecorder(context: Context, private val handler: Handler) : SensorE
             val postPart = if (post.isEmpty()) "시동 끈 뒤 샘플 없음"
                 else "시동 끈 뒤 5~20초 %s(%d개)".format(Locale.US,
                     fmt(post.map { it.second.toDouble() }.average() - pPark), post.size)
+            val minAgeSec = (minEntry.key * BIN_MS / 1000).toInt()
             return ("기압 기록 — 주차 %.2fhPa, 3분내 최저 %.2f(%d초 전) → Δ%s hPa (60초 전 대비 %s, 120초 전 대비 %s), %s, 샘플 %d개" +
-                " → 기압 예측 %s (기준 Δ%.1f, 판정엔 미사용)")
-                .format(Locale.US, pPark, minEntry.value, minEntry.key * BIN_MS / 1000,
-                    fmt(delta), lag(60), lag(120), postPart, n, predictFloor(delta), B2_MIN_DELTA_HPA)
+                " → 기압 예측 %s (기준 Δ%.1f, 판정엔 미사용)" +
+                " / 최저시점 예측 %s (기준 %d초, 판정엔 미사용)")
+                .format(Locale.US, pPark, minEntry.value, minAgeSec,
+                    fmt(delta), lag(60), lag(120), postPart, n, predictFloor(delta), B2_MIN_DELTA_HPA,
+                    predictFloorByMinAge(minAgeSec), B2_MIN_MIN_AGE_SEC)
         }
 
         private fun fmt(d: Double) = String.format(Locale.US, "%+.2f", d)
